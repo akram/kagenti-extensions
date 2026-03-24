@@ -29,6 +29,31 @@ import (
 
 var builderLog = logf.Log.WithName("container-builder")
 
+// registrationUsesDynamicSVID returns true when client-registration should use
+// Keycloak Client Registration Service with a JWT-SVID (or initial access token)
+// bearer instead of KEYCLOAK_ADMIN_* credentials.
+func registrationUsesDynamicSVID(r *ResolvedConfig, spireEnabled bool) bool {
+	if r == nil {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(r.RegistrationMode))
+	switch mode {
+	case "dynamic-svid":
+		return true
+	case "admin-api":
+		return false
+	}
+	// "auto", empty, or unknown — match Helm: dynamic-svid when SPIRE + federated-jwt
+	return spireEnabled && strings.EqualFold(strings.TrimSpace(r.ClientAuthType), "federated-jwt")
+}
+
+func registrationModeEnvValue(r *ResolvedConfig, spireEnabled bool) string {
+	if registrationUsesDynamicSVID(r, spireEnabled) {
+		return "dynamic-svid"
+	}
+	return "admin-api"
+}
+
 const (
 	// Container names for AuthBridge sidecars
 	EnvoyProxyContainerName  = "envoy-proxy"
@@ -234,35 +259,43 @@ func (b *ContainerBuilder) buildClientRegistrationEnvResolved(clientName string,
 	if secretName == "" {
 		secretName = KeycloakAdminSecretName
 	}
-	return []corev1.EnvVar{
+	env := []corev1.EnvVar{
 		{Name: "SPIRE_ENABLED", Value: fmt.Sprintf("%t", spireEnabled)},
 		{Name: "KEYCLOAK_URL", Value: b.resolved.KeycloakURL},
 		{Name: "KEYCLOAK_REALM", Value: b.resolved.KeycloakRealm},
-		{
-			Name: "KEYCLOAK_ADMIN_USERNAME",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  "KEYCLOAK_ADMIN_USERNAME",
-				},
-			},
-		},
-		{
-			Name: "KEYCLOAK_ADMIN_PASSWORD",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  "KEYCLOAK_ADMIN_PASSWORD",
-				},
-			},
-		},
-		{Name: "CLIENT_NAME", Value: clientName},
-		{Name: "SECRET_FILE_PATH", Value: "/shared/client-secret.txt"},
-		{Name: "PLATFORM_CLIENT_IDS", Value: b.resolved.PlatformClientIDs},
-		{Name: "CLIENT_AUTH_TYPE", Value: b.resolved.ClientAuthType},
-		{Name: "SPIFFE_IDP_ALIAS", Value: b.resolved.SpiffeIdpAlias},
-		{Name: "JWT_AUDIENCE", Value: b.resolved.JWTAudience},
+		{Name: "KEYCLOAK_REGISTRATION_MODE", Value: registrationModeEnvValue(b.resolved, spireEnabled)},
 	}
+	if !registrationUsesDynamicSVID(b.resolved, spireEnabled) {
+		env = append(env,
+			corev1.EnvVar{
+				Name: "KEYCLOAK_ADMIN_USERNAME",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "KEYCLOAK_ADMIN_USERNAME",
+					},
+				},
+			},
+			corev1.EnvVar{
+				Name: "KEYCLOAK_ADMIN_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "KEYCLOAK_ADMIN_PASSWORD",
+					},
+				},
+			},
+		)
+	}
+	env = append(env,
+		corev1.EnvVar{Name: "CLIENT_NAME", Value: clientName},
+		corev1.EnvVar{Name: "SECRET_FILE_PATH", Value: "/shared/client-secret.txt"},
+		corev1.EnvVar{Name: "PLATFORM_CLIENT_IDS", Value: b.resolved.PlatformClientIDs},
+		corev1.EnvVar{Name: "CLIENT_AUTH_TYPE", Value: b.resolved.ClientAuthType},
+		corev1.EnvVar{Name: "SPIFFE_IDP_ALIAS", Value: b.resolved.SpiffeIdpAlias},
+		corev1.EnvVar{Name: "JWT_AUDIENCE", Value: b.resolved.JWTAudience},
+	)
+	return env
 }
 
 // buildClientRegistrationEnvLegacy returns ValueFrom-based env vars (backward compat).
@@ -292,11 +325,22 @@ func (b *ContainerBuilder) buildClientRegistrationEnvLegacy(clientName string, s
 			},
 		},
 		{
+			Name: "KEYCLOAK_REGISTRATION_MODE",
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AuthBridgeConfigMapName},
+					Key:                  "KEYCLOAK_REGISTRATION_MODE",
+					Optional:             ptr.To(true),
+				},
+			},
+		},
+		{
 			Name: "KEYCLOAK_ADMIN_USERNAME",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "keycloak-admin-secret"},
 					Key:                  "KEYCLOAK_ADMIN_USERNAME",
+					Optional:             ptr.To(true),
 				},
 			},
 		},
@@ -306,6 +350,7 @@ func (b *ContainerBuilder) buildClientRegistrationEnvLegacy(clientName string, s
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "keycloak-admin-secret"},
 					Key:                  "KEYCLOAK_ADMIN_PASSWORD",
+					Optional:             ptr.To(true),
 				},
 			},
 		},
@@ -669,29 +714,38 @@ func (b *ContainerBuilder) buildAuthBridgeEnvResolved(clientName string, spireEn
 		{Name: "CLIENT_SECRET_FILE", Value: "/shared/client-secret.txt"},
 		{Name: "ROUTES_CONFIG_PATH", Value: "/etc/authproxy/routes.yaml"},
 		{Name: "DEFAULT_OUTBOUND_POLICY", Value: b.resolved.DefaultOutboundPolicy},
-		// Client-registration env vars (sensitive values stay as SecretKeyRef)
-		{
-			Name: "KEYCLOAK_ADMIN_USERNAME",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  "KEYCLOAK_ADMIN_USERNAME",
-				},
-			},
-		},
-		{
-			Name: "KEYCLOAK_ADMIN_PASSWORD",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-					Key:                  "KEYCLOAK_ADMIN_PASSWORD",
-				},
-			},
-		},
-		{Name: "CLIENT_NAME", Value: clientName},
-		{Name: "SECRET_FILE_PATH", Value: "/shared/client-secret.txt"},
-		{Name: "PLATFORM_CLIENT_IDS", Value: b.resolved.PlatformClientIDs},
+		{Name: "KEYCLOAK_REGISTRATION_MODE", Value: registrationModeEnvValue(b.resolved, spireEnabled)},
+		{Name: "CLIENT_AUTH_TYPE", Value: b.resolved.ClientAuthType},
+		{Name: "SPIFFE_IDP_ALIAS", Value: b.resolved.SpiffeIdpAlias},
+		{Name: "JWT_AUDIENCE", Value: b.resolved.JWTAudience},
 	}
+	if clientRegistrationEnabled && !registrationUsesDynamicSVID(b.resolved, spireEnabled) {
+		env = append(env,
+			corev1.EnvVar{
+				Name: "KEYCLOAK_ADMIN_USERNAME",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "KEYCLOAK_ADMIN_USERNAME",
+					},
+				},
+			},
+			corev1.EnvVar{
+				Name: "KEYCLOAK_ADMIN_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "KEYCLOAK_ADMIN_PASSWORD",
+					},
+				},
+			},
+		)
+	}
+	env = append(env,
+		corev1.EnvVar{Name: "CLIENT_NAME", Value: clientName},
+		corev1.EnvVar{Name: "SECRET_FILE_PATH", Value: "/shared/client-secret.txt"},
+		corev1.EnvVar{Name: "PLATFORM_CLIENT_IDS", Value: b.resolved.PlatformClientIDs},
+	)
 
 	return env
 }
@@ -786,13 +840,54 @@ func (b *ContainerBuilder) buildAuthBridgeEnvLegacy(clientName string, spireEnab
 				},
 			},
 		},
-		// Client-registration env vars
+		{
+			Name: "KEYCLOAK_REGISTRATION_MODE",
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AuthBridgeConfigMapName},
+					Key:                  "KEYCLOAK_REGISTRATION_MODE",
+					Optional:             ptr.To(true),
+				},
+			},
+		},
+		{
+			Name: "CLIENT_AUTH_TYPE",
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AuthBridgeConfigMapName},
+					Key:                  "CLIENT_AUTH_TYPE",
+					Optional:             ptr.To(true),
+				},
+			},
+		},
+		{
+			Name: "SPIFFE_IDP_ALIAS",
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AuthBridgeConfigMapName},
+					Key:                  "SPIFFE_IDP_ALIAS",
+					Optional:             ptr.To(true),
+				},
+			},
+		},
+		{
+			Name: "JWT_AUDIENCE",
+			ValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: AuthBridgeConfigMapName},
+					Key:                  "JWT_AUDIENCE",
+					Optional:             ptr.To(true),
+				},
+			},
+		},
+		// Client-registration env vars (optional: omitted when using dynamic-svid registration)
 		{
 			Name: "KEYCLOAK_ADMIN_USERNAME",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "keycloak-admin-secret"},
 					Key:                  "KEYCLOAK_ADMIN_USERNAME",
+					Optional:             ptr.To(true),
 				},
 			},
 		},
@@ -802,6 +897,7 @@ func (b *ContainerBuilder) buildAuthBridgeEnvLegacy(clientName string, spireEnab
 				SecretKeyRef: &corev1.SecretKeySelector{
 					LocalObjectReference: corev1.LocalObjectReference{Name: "keycloak-admin-secret"},
 					Key:                  "KEYCLOAK_ADMIN_PASSWORD",
+					Optional:             ptr.To(true),
 				},
 			},
 		},

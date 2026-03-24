@@ -51,6 +51,8 @@ type NamespaceConfig struct {
 	ClientAuthType        string // "client-secret" or "federated-jwt"
 	SpiffeIdpAlias        string // Keycloak SPIFFE Identity Provider alias (e.g., "spire-spiffe")
 	JWTAudience           string // JWT audience for SPIFFE authentication
+	// RegistrationMode: admin-api | dynamic-svid | empty (auto: dynamic-svid when SPIRE+federated-jwt)
+	RegistrationMode string
 
 	// From "spiffe-helper-config" ConfigMap
 	SpiffeHelperConf string // raw helper.conf content
@@ -85,6 +87,7 @@ func ReadNamespaceConfig(ctx context.Context, c client.Reader, namespace string)
 		cfg.ClientAuthType = cm.Data["CLIENT_AUTH_TYPE"]
 		cfg.SpiffeIdpAlias = cm.Data["SPIFFE_IDP_ALIAS"]
 		cfg.JWTAudience = cm.Data["JWT_AUDIENCE"]
+		cfg.RegistrationMode = cm.Data["KEYCLOAK_REGISTRATION_MODE"]
 	}
 
 	// Note: keycloak-admin-secret is not read here. The resolved container builder

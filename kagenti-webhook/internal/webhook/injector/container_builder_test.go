@@ -198,6 +198,35 @@ func TestBuildClientRegistrationContainer_ResolvedPath_AdminCredentialsFromSecre
 	}
 }
 
+func TestBuildClientRegistrationContainer_ResolvedPath_DynamicSVID_NoAdminCredentials(t *testing.T) {
+	resolved := &ResolvedConfig{
+		Platform:       config.CompiledDefaults(),
+		KeycloakURL:    "https://keycloak.example.com",
+		KeycloakRealm:  "kagenti",
+		ClientAuthType: "federated-jwt",
+	}
+	builder := NewResolvedContainerBuilder(resolved)
+	container := builder.BuildClientRegistrationContainerWithSpireOption("my-app", "my-ns", true)
+
+	for _, key := range []string{"KEYCLOAK_ADMIN_USERNAME", "KEYCLOAK_ADMIN_PASSWORD"} {
+		for _, env := range container.Env {
+			if env.Name == key {
+				t.Fatalf("unexpected env %q for dynamic-svid registration", key)
+			}
+		}
+	}
+	foundMode := false
+	for _, env := range container.Env {
+		if env.Name == "KEYCLOAK_REGISTRATION_MODE" && env.Value == "dynamic-svid" {
+			foundMode = true
+			break
+		}
+	}
+	if !foundMode {
+		t.Error("expected KEYCLOAK_REGISTRATION_MODE=dynamic-svid")
+	}
+}
+
 func TestBuildClientRegistrationContainer_NonSensitiveKeysFromConfigMap(t *testing.T) {
 	builder := NewContainerBuilder(config.CompiledDefaults())
 	container := builder.BuildClientRegistrationContainerWithSpireOption("my-app", "my-ns", true)
@@ -656,6 +685,25 @@ func TestBuildAuthBridgeContainer_ResolvedMode(t *testing.T) {
 			if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
 				t.Errorf("env %q must use SecretKeyRef", env.Name)
 			}
+		}
+	}
+}
+
+func TestBuildAuthBridgeContainer_Resolved_DynamicSVID_NoAdminCredentials(t *testing.T) {
+	resolved := &ResolvedConfig{
+		Platform:              config.CompiledDefaults(),
+		KeycloakURL:           "https://keycloak.example.com",
+		KeycloakRealm:         "test-realm",
+		TokenURL:              "https://keycloak.example.com/realms/test-realm/protocol/openid-connect/token",
+		DefaultOutboundPolicy: "passthrough",
+		ClientAuthType:        "federated-jwt",
+	}
+	builder := NewResolvedContainerBuilder(resolved)
+	container := builder.BuildAuthBridgeContainer("my-agent", "test-ns", true, true)
+
+	for _, env := range container.Env {
+		if env.Name == "KEYCLOAK_ADMIN_USERNAME" || env.Name == "KEYCLOAK_ADMIN_PASSWORD" {
+			t.Fatalf("unexpected env %q for dynamic-svid registration", env.Name)
 		}
 	}
 }

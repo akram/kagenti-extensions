@@ -45,6 +45,7 @@ type ResolvedConfig struct {
 	ClientAuthType        string // "client-secret" or "federated-jwt"
 	SpiffeIdpAlias        string // Keycloak SPIFFE Identity Provider alias
 	JWTAudience           string // JWT audience for SPIFFE authentication
+	RegistrationMode      string // KEYCLOAK_REGISTRATION_MODE from authbridge-config
 
 	// Sidecar configs — from namespace CMs (not overridable by AgentRuntime v1alpha1)
 	SpiffeHelperConf    string
@@ -86,6 +87,7 @@ func ResolveConfig(platform *config.PlatformConfig, ns *NamespaceConfig, ar *Age
 		ClientAuthType:             ns.ClientAuthType,
 		SpiffeIdpAlias:             ns.SpiffeIdpAlias,
 		JWTAudience:                ns.JWTAudience,
+		RegistrationMode:           ns.RegistrationMode,
 		SpiffeHelperConf:           ns.SpiffeHelperConf,
 		EnvoyYAML:                  ns.EnvoyYAML,
 		AuthproxyRoutesYAML:        ns.AuthproxyRoutesYAML,

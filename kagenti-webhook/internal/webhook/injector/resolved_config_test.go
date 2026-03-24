@@ -52,6 +52,14 @@ func TestResolveConfig_NamespaceOnly(t *testing.T) {
 	}
 }
 
+func TestResolveConfig_RegistrationMode_FromNamespace(t *testing.T) {
+	ns := &NamespaceConfig{RegistrationMode: "admin-api"}
+	resolved := ResolveConfig(config.CompiledDefaults(), ns, nil)
+	if resolved.RegistrationMode != "admin-api" {
+		t.Errorf("RegistrationMode = %q, want admin-api", resolved.RegistrationMode)
+	}
+}
+
 func TestResolveConfig_AgentRuntimeOverrides_Realm(t *testing.T) {
 	ns := &NamespaceConfig{
 		KeycloakRealm: "ns-realm",

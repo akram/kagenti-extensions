@@ -128,11 +128,25 @@ sequenceDiagram
 | `KEYCLOAK_URL` | Yes* | Keycloak server URL (auto-derived from `TOKEN_URL` if not provided) | `http://keycloak:8080` |
 | `KEYCLOAK_REALM` | Yes* | Keycloak realm name (auto-derived from `TOKEN_URL` if not provided) | `kagenti` |
 | `TOKEN_URL` | No | Keycloak token endpoint (used to auto-derive `KEYCLOAK_URL` and `KEYCLOAK_REALM`) | `http://keycloak:8080/realms/kagenti/protocol/openid-connect/token` |
-| `KEYCLOAK_ADMIN_USERNAME` | Yes | Admin username | `admin` |
-| `KEYCLOAK_ADMIN_PASSWORD` | Yes | Admin password | `admin` |
+| `KEYCLOAK_REGISTRATION_MODE` | No | `admin-api` (Keycloak Admin REST API + `KEYCLOAK_ADMIN_*`) or `dynamic-svid` (Client Registration Service with `Authorization: Bearer` JWT-SVID). Unset = auto: `dynamic-svid` when `SPIRE_ENABLED=true` and `CLIENT_AUTH_TYPE=federated-jwt`. | `dynamic-svid` |
+| `KEYCLOAK_REGISTRATION_INITIAL_ACCESS_TOKEN` | No | If set, used as the registration bearer token instead of the raw JWT-SVID (Keycloak initial access token). Not a Keycloak admin password. | |
+| `KEYCLOAK_TLS_INSECURE_SKIP_VERIFY` | No | Set to `true` to skip TLS verification for HTTPS `KEYCLOAK_URL` (testing only). | `false` |
+| `KEYCLOAK_ADMIN_USERNAME` | Yes† | Admin username (admin-api mode only) | `admin` |
+| `KEYCLOAK_ADMIN_PASSWORD` | Yes† | Admin password (admin-api mode only) | `admin` |
 | `KEYCLOAK_TOKEN_EXCHANGE_ENABLED` | No | Enable token exchange for client (default: `true`) | `true` |
 | `KEYCLOAK_CLIENT_REGISTRATION_ENABLED` | No | Enable/disable registration (default: `true`) | `true` |
 | `SECRET_FILE_PATH` | No | Path to write client secret (default: `/shared/secret.txt`) | `/shared/client-secret.txt` |
+
+† `KEYCLOAK_ADMIN_*` is **not** used when `KEYCLOAK_REGISTRATION_MODE` resolves to `dynamic-svid` (federated JWT + SPIRE by default in the Kagenti chart).
+
+### Dynamic client registration (`dynamic-svid`)
+
+In this mode the workload calls Keycloak’s [Client Registration Service](https://www.keycloak.org/securing-apps/client-registration) at  
+`/realms/{realm}/clients-registrations/default` with `Authorization: Bearer` set to the **JWT-SVID** from `/opt/jwt_svid.token` (or to `KEYCLOAK_REGISTRATION_INITIAL_ACCESS_TOKEN` if you set that env var — still **not** the realm admin password).
+
+Keycloak must accept that bearer for client creation. Typical options are an **initial access token**, **token exchange** from the SVID into a Keycloak access token with `create-client`, or a **custom registration provider** / policy. If you see HTTP **401**, the bearer is not yet trusted; adjust realm configuration or supply `KEYCLOAK_REGISTRATION_INITIAL_ACCESS_TOKEN`.
+
+**Audience scope** setup in this script uses the Admin API and is **disabled** in `dynamic-svid` mode (defaults to skipping); handle audiences via realm defaults or a separate privileged job if required.
 
 **Note:** `KEYCLOAK_URL` and `KEYCLOAK_REALM` can be automatically derived from `TOKEN_URL` if not explicitly provided. For example:
 - `TOKEN_URL`: `http://keycloak-service.keycloak.svc:8080/realms/kagenti/protocol/openid-connect/token`
