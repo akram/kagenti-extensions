@@ -496,12 +496,12 @@ func TestBuildAuthBridgeContainer_SpireEnabled_AllMounts(t *testing.T) {
 	container := builder.BuildAuthBridgeContainer("my-agent", "test-ns", true, true)
 
 	wantMounts := map[string]string{
-		"envoy-config":        "/etc/envoy",
-		"authproxy-routes":    "/etc/authproxy",
-		"shared-data":         "/shared",
-		"svid-output":         "/opt",
+		"envoy-config":         "/etc/envoy",
+		"authproxy-routes":     "/etc/authproxy",
+		"shared-data":          "/shared",
+		"svid-output":          "/opt",
 		"spiffe-helper-config": "/etc/spiffe-helper",
-		"spire-agent-socket":  "/spiffe-workload-api",
+		"spire-agent-socket":   "/spiffe-workload-api",
 	}
 
 	mountsByName := make(map[string]string)
@@ -673,6 +673,49 @@ func TestBuildAuthBridgeContainer_ClientName(t *testing.T) {
 		}
 	}
 	t.Error("missing CLIENT_NAME env var")
+}
+
+func TestBuildAuthBridgeContainer_WebhookOAuth_NoAdminEnv(t *testing.T) {
+	resolved := &ResolvedConfig{
+		Platform:              config.CompiledDefaults(),
+		KeycloakURL:           "https://keycloak.example.com",
+		KeycloakRealm:         "test-realm",
+		TokenURL:              "https://keycloak.example.com/realms/test-realm/protocol/openid-connect/token",
+		DefaultOutboundPolicy: "passthrough",
+	}
+	builder := NewResolvedContainerBuilder(resolved).WithOAuthWorkloadSecret("kagenti-oauth-test")
+	container := builder.BuildAuthBridgeContainer("my-agent", "test-ns", true, true)
+	for _, env := range container.Env {
+		if env.Name == "KEYCLOAK_ADMIN_USERNAME" || env.Name == "KEYCLOAK_ADMIN_PASSWORD" {
+			t.Errorf("unexpected admin env %q when OAuth pre-provisioned", env.Name)
+		}
+	}
+	envBy := make(map[string]string)
+	for _, e := range container.Env {
+		if e.Value != "" {
+			envBy[e.Name] = e.Value
+		}
+	}
+	if envBy["CLIENT_REGISTRATION_ENABLED"] != "false" {
+		t.Errorf("CLIENT_REGISTRATION_ENABLED = %q, want false", envBy["CLIENT_REGISTRATION_ENABLED"])
+	}
+}
+
+func TestBuildAuthBridgeContainer_WebhookOAuth_SubPathMounts(t *testing.T) {
+	builder := NewContainerBuilder(config.CompiledDefaults()).WithOAuthWorkloadSecret("kagenti-oauth-x")
+	container := builder.BuildAuthBridgeContainer("a", "ns", false, true)
+	n := 0
+	for _, vm := range container.VolumeMounts {
+		if vm.Name == OauthWorkloadVolumeName {
+			n++
+			if !vm.ReadOnly || vm.SubPath == "" {
+				t.Errorf("unexpected oauth mount: %#v", vm)
+			}
+		}
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 oauth subpath mounts, got %d", n)
+	}
 }
 
 func TestBuildEnvoyProxyContainer_HasExpectedAudienceFromConfigMap(t *testing.T) {

@@ -192,3 +192,18 @@ func BuildResolvedVolumes(spireEnabled bool, envoyConfigMapName string) []corev1
 
 	return volumes
 }
+
+// AppendOAuthWorkloadSecretVolume appends a Secret volume for webhook-provisioned OAuth client files.
+func AppendOAuthWorkloadSecretVolume(volumes []corev1.Volume, secretName string) []corev1.Volume {
+	if secretName == "" {
+		return volumes
+	}
+	return append(volumes, corev1.Volume{
+		Name: OauthWorkloadVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+			},
+		},
+	})
+}

@@ -163,13 +163,17 @@ This comprehensive test verifies the complete federated-JWT authentication flow:
 
 ### 4.1. Create Test Deployment
 
+**kagenti-webhook injected workloads:** Keycloak client registration runs **in the webhook** using `KAGENTI_REGISTRAR_KEYCLOAK_USERNAME` and `KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD` (from a Secret in the webhook namespace, see `kagenti-webhook/config/manager/registrar_env.yaml`). The webhook creates a per-workload `kagenti-oauth-*` Secret in the agent namespace with `client-id.txt` and `client-secret.txt`. **Do not** create `keycloak-admin-secret` in agent namespaces for those pods.
+
+The steps below are for **standalone** demos that run the `client-registration` container manually (no mutating webhook).
+
 Deploy a pod with spiffe-helper and client-registration to automatically register with Keycloak:
 
 ```bash
 # Create namespace
 kubectl create namespace agent1
 
-# Create Keycloak admin secret
+# Create Keycloak admin secret (standalone client-registration only; not used by webhook injection)
 # (Kagenti automatically creates this in agent namespaces listed in agentNamespaces,
 #  but agent1 is a manual test namespace not in that list)
 kubectl create secret generic keycloak-admin-secret -n agent1 \

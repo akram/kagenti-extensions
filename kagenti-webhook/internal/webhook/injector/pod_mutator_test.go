@@ -36,7 +36,13 @@ func newTestMutator(objs ...client.Object) *PodMutator {
 		Client:                   fakeClient,
 		EnableClientRegistration: true,
 		GetPlatformConfig:        config.CompiledDefaults,
-		GetFeatureGates:          config.DefaultFeatureGates,
+		GetFeatureGates: func() *config.FeatureGates {
+			fg := config.DefaultFeatureGates()
+			fg.ClientRegistration = false
+			return fg
+		},
+		RegistrarUsername: "test",
+		RegistrarPassword: "test",
 	}
 }
 
@@ -392,8 +398,11 @@ func newTestMutatorWithCombinedSidecar(objs ...client.Object) *PodMutator {
 		GetFeatureGates: func() *config.FeatureGates {
 			fg := config.DefaultFeatureGates()
 			fg.CombinedSidecar = true
+			fg.ClientRegistration = false
 			return fg
 		},
+		RegistrarUsername: "test",
+		RegistrarPassword: "test",
 	}
 }
 
@@ -446,8 +455,11 @@ func TestInjectAuthBridge_CombinedMode_EnvoyDisabled_NoInjection(t *testing.T) {
 			fg := config.DefaultFeatureGates()
 			fg.CombinedSidecar = true
 			fg.EnvoyProxy = false
+			fg.ClientRegistration = false
 			return fg
 		},
+		RegistrarUsername: "test",
+		RegistrarPassword: "test",
 	}
 	ctx := context.Background()
 

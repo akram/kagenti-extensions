@@ -1,0 +1,26 @@
+# Merge patch: Keycloak admin credentials for webhook-only client registration.
+# Create the Secret first, e.g.:
+#   kubectl -n kagenti-webhook-system create secret generic kagenti-keycloak-registrar \
+#     --from-literal=KEYCLOAK_ADMIN_USERNAME=admin \
+#     --from-literal=KEYCLOAK_ADMIN_PASSWORD=changeme
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller-manager
+  namespace: system
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        env:
+        - name: KAGENTI_REGISTRAR_KEYCLOAK_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: kagenti-keycloak-registrar
+              key: KEYCLOAK_ADMIN_USERNAME
+        - name: KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kagenti-keycloak-registrar
+              key: KEYCLOAK_ADMIN_PASSWORD

@@ -121,7 +121,13 @@ var _ = BeforeSuite(func() {
 		k8sClient,
 		true,
 		func() *config.PlatformConfig { return config.CompiledDefaults() },
-		func() *config.FeatureGates { return config.DefaultFeatureGates() },
+		func() *config.FeatureGates {
+			fg := config.DefaultFeatureGates()
+			fg.ClientRegistration = false
+			return fg
+		},
+		"test",
+		"test",
 	)
 
 	err = SetupAuthBridgeWebhookWithManager(mgr, podMutator)

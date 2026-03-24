@@ -100,3 +100,21 @@ func TestBuildResolvedVolumes_DefaultEnvoyConfigMapName(t *testing.T) {
 	}
 	t.Fatal("envoy-config volume not found")
 }
+
+func TestAppendOAuthWorkloadSecretVolume(t *testing.T) {
+	base := BuildResolvedVolumes(false, "")
+	out := AppendOAuthWorkloadSecretVolume(base, "kagenti-oauth-deadbeef")
+	if len(out) != len(base)+1 {
+		t.Fatalf("expected one extra volume, got %d vs %d", len(out), len(base))
+	}
+	last := out[len(out)-1]
+	if last.Name != OauthWorkloadVolumeName {
+		t.Fatalf("volume name = %q, want %q", last.Name, OauthWorkloadVolumeName)
+	}
+	if last.Secret == nil || last.Secret.SecretName != "kagenti-oauth-deadbeef" {
+		t.Fatalf("unexpected secret ref: %#v", last.Secret)
+	}
+	if AppendOAuthWorkloadSecretVolume(base, "")[0].Name != base[0].Name {
+		t.Fatal("empty secret name should not append")
+	}
+}

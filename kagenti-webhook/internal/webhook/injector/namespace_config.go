@@ -38,19 +38,21 @@ const (
 // NamespaceConfig holds resolved values from namespace ConfigMaps/Secrets.
 type NamespaceConfig struct {
 	// From "authbridge-config" ConfigMap
-	KeycloakURL           string
-	KeycloakRealm         string
-	SpireEnabled          string
-	PlatformClientIDs     string
-	TokenURL              string
-	Issuer                string
-	ExpectedAudience      string
-	TargetAudience        string
-	TargetScopes          string
-	DefaultOutboundPolicy string
-	ClientAuthType        string // "client-secret" or "federated-jwt"
-	SpiffeIdpAlias        string // Keycloak SPIFFE Identity Provider alias (e.g., "spire-spiffe")
-	JWTAudience           string // JWT audience for SPIFFE authentication
+	KeycloakURL                  string
+	KeycloakRealm                string
+	KeycloakTokenExchangeEnabled string // KEYCLOAK_TOKEN_EXCHANGE_ENABLED, default true when empty
+	KeycloakAudienceScopeEnabled string // KEYCLOAK_AUDIENCE_SCOPE_ENABLED, default true when empty
+	SpireEnabled                 string
+	PlatformClientIDs            string
+	TokenURL                     string
+	Issuer                       string
+	ExpectedAudience             string
+	TargetAudience               string
+	TargetScopes                 string
+	DefaultOutboundPolicy        string
+	ClientAuthType               string // "client-secret" or "federated-jwt"
+	SpiffeIdpAlias               string // Keycloak SPIFFE Identity Provider alias (e.g., "spire-spiffe")
+	JWTAudience                  string // JWT audience for SPIFFE authentication
 
 	// From "spiffe-helper-config" ConfigMap
 	SpiffeHelperConf string // raw helper.conf content
@@ -74,6 +76,8 @@ func ReadNamespaceConfig(ctx context.Context, c client.Reader, namespace string)
 	} else {
 		cfg.KeycloakURL = cm.Data["KEYCLOAK_URL"]
 		cfg.KeycloakRealm = cm.Data["KEYCLOAK_REALM"]
+		cfg.KeycloakTokenExchangeEnabled = cm.Data["KEYCLOAK_TOKEN_EXCHANGE_ENABLED"]
+		cfg.KeycloakAudienceScopeEnabled = cm.Data["KEYCLOAK_AUDIENCE_SCOPE_ENABLED"]
 		cfg.SpireEnabled = cm.Data["SPIRE_ENABLED"]
 		cfg.PlatformClientIDs = cm.Data["PLATFORM_CLIENT_IDS"]
 		cfg.TokenURL = cm.Data["TOKEN_URL"]

@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/kagenti/kagenti-extensions/kagenti-webhook/internal/webhook/config"
+	"github.com/kagenti/kagenti-extensions/kagenti-webhook/internal/webhook/registrar"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -78,6 +79,9 @@ type PodMutator struct {
 	// Getter functions for hot-reloadable config (used by precedence evaluator)
 	GetPlatformConfig func() *config.PlatformConfig
 	GetFeatureGates   func() *config.FeatureGates
+	// RegistrarUsername and RegistrarPassword are Keycloak admin credentials used only by the webhook (not workload pods).
+	RegistrarUsername string
+	RegistrarPassword string
 }
 
 func NewPodMutator(
@@ -85,12 +89,15 @@ func NewPodMutator(
 	enableClientRegistration bool,
 	getPlatformConfig func() *config.PlatformConfig,
 	getFeatureGates func() *config.FeatureGates,
+	registrarUsername, registrarPassword string,
 ) *PodMutator {
 	return &PodMutator{
 		Client:                   client,
 		EnableClientRegistration: enableClientRegistration,
 		GetPlatformConfig:        getPlatformConfig,
 		GetFeatureGates:          getFeatureGates,
+		RegistrarUsername:        registrarUsername,
+		RegistrarPassword:        registrarPassword,
 	}
 }
 
@@ -186,6 +193,64 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	}
 
 	// ========================================
+	// Namespace config + Keycloak OAuth (webhook registrar)
+	// ========================================
+	nsConfig, err := ReadNamespaceConfig(ctx, m.Client, namespace)
+	if err != nil {
+		mutatorLog.Error(err, "failed to read namespace config, using empty defaults",
+			"namespace", namespace)
+		nsConfig = &NamespaceConfig{}
+	}
+	var arOverrides *AgentRuntimeOverrides
+	arOverrides, err = ReadAgentRuntimeOverrides(ctx, m.Client, namespace, crName)
+	if err != nil {
+		mutatorLog.Error(err, "failed to read AgentRuntime overrides, continuing without",
+			"namespace", namespace, "crName", crName)
+	}
+	resolved := ResolveConfig(currentConfig, nsConfig, arOverrides)
+
+	oauthSecretName := ""
+	if decision.ClientRegistration.Inject && m.EnableClientRegistration {
+		if m.RegistrarUsername == "" || m.RegistrarPassword == "" {
+			return false, fmt.Errorf("kagenti webhook: client registration requires registrar credentials " +
+				"(set KAGENTI_REGISTRAR_KEYCLOAK_USERNAME and KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD on the webhook deployment)")
+		}
+		if resolved.KeycloakURL == "" || resolved.KeycloakRealm == "" {
+			return false, fmt.Errorf("kagenti webhook: KEYCLOAK_URL and KEYCLOAK_REALM must be set in authbridge-config for client registration")
+		}
+		saName := podSpec.ServiceAccountName
+		if saName == "" {
+			saName = "default"
+		}
+		clientID := ComputeKeycloakClientID(resolved.SpiffeTrustDomain, namespace, crName, saName, spireEnabled)
+		clientName := namespace + "/" + crName
+		regIn := registrar.RegisterInput{
+			KeycloakURL:          resolved.KeycloakURL,
+			Realm:                resolved.KeycloakRealm,
+			AdminUsername:        m.RegistrarUsername,
+			AdminPassword:        m.RegistrarPassword,
+			ClientName:           clientName,
+			ClientID:             clientID,
+			TokenExchangeEnabled: ParseBoolDefault(nsConfig.KeycloakTokenExchangeEnabled, true),
+			AudienceScopeEnabled: ParseBoolDefault(nsConfig.KeycloakAudienceScopeEnabled, true),
+			PlatformClientIDs:    resolved.PlatformClientIDs,
+			ClientAuthType:       resolved.ClientAuthType,
+			SpiffeIdpAlias:       resolved.SpiffeIdpAlias,
+		}
+		regRes, regErr := registrar.Register(ctx, regIn)
+		if regErr != nil {
+			return false, fmt.Errorf("keycloak client registration: %w", regErr)
+		}
+		secretName := registrar.WorkloadOAuthSecretName(namespace, crName, clientID)
+		if err := registrar.EnsureWorkloadOAuthSecret(ctx, m.Client, namespace, secretName, crName, clientID, regRes); err != nil {
+			return false, fmt.Errorf("create workload oauth secret: %w", err)
+		}
+		oauthSecretName = secretName
+		mutatorLog.Info("provisioned OAuth client Secret for workload",
+			"namespace", namespace, "secret", oauthSecretName, "clientId", clientID)
+	}
+
+	// ========================================
 	// Build containers + volumes
 	// ========================================
 	//
@@ -199,35 +264,13 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 	var requiredVolumes []corev1.Volume
 
 	if currentGates.PerWorkloadConfigResolution {
-		// Resolved path: read namespace config and build literal env vars
-		var nsConfig *NamespaceConfig
-		var err error
-		mutatorLog.V(1).Info("reading namespace config per-workload", "namespace", namespace)
-		nsConfig, err = ReadNamespaceConfig(ctx, m.Client, namespace)
-		if err != nil {
-			mutatorLog.Error(err, "failed to read namespace config, using empty defaults",
-				"namespace", namespace)
-			nsConfig = &NamespaceConfig{}
-		}
-
-		// Read AgentRuntime overrides (nil if CR not found or CRD not installed)
-		var arOverrides *AgentRuntimeOverrides
-		arOverrides, err = ReadAgentRuntimeOverrides(ctx, m.Client, namespace, crName)
-		if err != nil {
-			mutatorLog.Error(err, "failed to read AgentRuntime overrides, continuing without",
-				"namespace", namespace, "crName", crName)
-		}
-
-		resolved := ResolveConfig(currentConfig, nsConfig, arOverrides)
-		builder = NewResolvedContainerBuilder(resolved)
+		builder = NewResolvedContainerBuilder(resolved).WithOAuthWorkloadSecret(oauthSecretName)
 		requiredVolumes = BuildResolvedVolumes(spireEnabled, "")
-
 		mutatorLog.Info("Using resolved config path",
 			"namespace", namespace, "crName", crName,
 			"hasAgentRuntimeOverrides", arOverrides != nil)
 	} else {
-		// Legacy path: ValueFrom refs, kubelet resolves at runtime
-		builder = NewContainerBuilder(currentConfig)
+		builder = NewContainerBuilder(currentConfig).WithOAuthWorkloadSecret(oauthSecretName)
 		if spireEnabled {
 			requiredVolumes = BuildRequiredVolumes()
 		} else {
@@ -236,6 +279,11 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 		mutatorLog.Info("Using legacy ValueFrom config path",
 			"namespace", namespace, "crName", crName)
 	}
+	if oauthSecretName != "" {
+		requiredVolumes = AppendOAuthWorkloadSecretVolume(requiredVolumes, oauthSecretName)
+	}
+
+	legacyClientReg := decision.ClientRegistration.Inject && m.EnableClientRegistration && oauthSecretName == ""
 
 	// Conditionally inject sidecars based on precedence decisions.
 	// Two modes controlled by the combinedSidecar feature gate:
@@ -272,7 +320,7 @@ func (m *PodMutator) InjectAuthBridge(ctx context.Context, podSpec *corev1.PodSp
 			podSpec.Containers = append(podSpec.Containers, builder.BuildSpiffeHelperContainer())
 		}
 
-		if decision.ClientRegistration.Inject && !containerExists(podSpec.Containers, ClientRegistrationContainerName) {
+		if legacyClientReg && !containerExists(podSpec.Containers, ClientRegistrationContainerName) {
 			podSpec.Containers = append(podSpec.Containers, builder.BuildClientRegistrationContainerWithSpireOption(crName, namespace, spireEnabled))
 		}
 	}

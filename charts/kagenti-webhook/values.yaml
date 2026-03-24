@@ -26,6 +26,14 @@ webhook:
   certKey: tls.key
   port: 9443
 
+# Keycloak admin credentials used only by the webhook to register OAuth clients (not mounted into workload pods).
+# When webhook.enableClientRegistration is true, set existingSecret to a Secret in the webhook namespace
+# (e.g. create with KEYCLOAK_ADMIN_USERNAME / KEYCLOAK_ADMIN_PASSWORD keys).
+registrar:
+  existingSecret: ""
+  usernameKey: KEYCLOAK_ADMIN_USERNAME
+  passwordKey: KEYCLOAK_ADMIN_PASSWORD
+
 serviceAccount:
   create: true
   annotations: {}

@@ -1,0 +1,35 @@
+# ImageStreams receive BuildConfig output. Pull spec is used by Helm after builds complete.
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: kagenti-webhook
+  namespace: kagenti-images
+spec: {}
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: proxy-init
+  namespace: kagenti-images
+spec: {}
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: envoy-with-processor
+  namespace: kagenti-images
+spec: {}
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: authbridge
+  namespace: kagenti-images
+spec: {}
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: client-registration
+  namespace: kagenti-images
+spec: {}

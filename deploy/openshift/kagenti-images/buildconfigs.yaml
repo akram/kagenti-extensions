@@ -1,0 +1,131 @@
+# Replace KAGENTI_EXTENSIONS_GIT_URI and KAGENTI_EXTENSIONS_GIT_REF via envsubst or apply-openshift-buildconfigs.sh
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: kagenti-webhook
+  namespace: kagenti-images
+  labels:
+    app.kubernetes.io/component: kagenti-webhook
+spec:
+  failedBuildsHistoryLimit: 2
+  successfulBuildsHistoryLimit: 2
+  source:
+    type: Git
+    git:
+      uri: "${KAGENTI_EXTENSIONS_GIT_URI}"
+      ref: "${KAGENTI_EXTENSIONS_GIT_REF}"
+    contextDir: kagenti-webhook
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: kagenti-webhook:latest
+  runPolicy: Serial
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: kagenti-proxy-init
+  namespace: kagenti-images
+  labels:
+    app.kubernetes.io/component: proxy-init
+spec:
+  failedBuildsHistoryLimit: 2
+  successfulBuildsHistoryLimit: 2
+  source:
+    type: Git
+    git:
+      uri: "${KAGENTI_EXTENSIONS_GIT_URI}"
+      ref: "${KAGENTI_EXTENSIONS_GIT_REF}"
+    contextDir: AuthBridge/AuthProxy
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile.init
+  output:
+    to:
+      kind: ImageStreamTag
+      name: proxy-init:latest
+  runPolicy: Serial
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: kagenti-envoy-with-processor
+  namespace: kagenti-images
+  labels:
+    app.kubernetes.io/component: envoy-with-processor
+spec:
+  failedBuildsHistoryLimit: 2
+  successfulBuildsHistoryLimit: 2
+  source:
+    type: Git
+    git:
+      uri: "${KAGENTI_EXTENSIONS_GIT_URI}"
+      ref: "${KAGENTI_EXTENSIONS_GIT_REF}"
+    contextDir: AuthBridge/AuthProxy
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile.envoy
+  output:
+    to:
+      kind: ImageStreamTag
+      name: envoy-with-processor:latest
+  runPolicy: Serial
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: kagenti-authbridge
+  namespace: kagenti-images
+  labels:
+    app.kubernetes.io/component: authbridge
+spec:
+  failedBuildsHistoryLimit: 2
+  successfulBuildsHistoryLimit: 2
+  source:
+    type: Git
+    git:
+      uri: "${KAGENTI_EXTENSIONS_GIT_URI}"
+      ref: "${KAGENTI_EXTENSIONS_GIT_REF}"
+    # Dockerfile.authbridge expects paths AuthProxy/... and client-registration/... under this root
+    contextDir: AuthBridge
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: AuthProxy/Dockerfile.authbridge
+  output:
+    to:
+      kind: ImageStreamTag
+      name: authbridge:latest
+  runPolicy: Serial
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: kagenti-client-registration
+  namespace: kagenti-images
+  labels:
+    app.kubernetes.io/component: client-registration
+spec:
+  failedBuildsHistoryLimit: 2
+  successfulBuildsHistoryLimit: 2
+  source:
+    type: Git
+    git:
+      uri: "${KAGENTI_EXTENSIONS_GIT_URI}"
+      ref: "${KAGENTI_EXTENSIONS_GIT_REF}"
+    contextDir: AuthBridge/client-registration
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: client-registration:latest
+  runPolicy: Serial

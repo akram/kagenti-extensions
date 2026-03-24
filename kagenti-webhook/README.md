@@ -11,9 +11,10 @@ The webhook injects:
 1. **`proxy-init`** (init container) - Configures iptables rules for traffic interception
 2. **`envoy-proxy`** - Service mesh proxy for traffic management
 3. **`spiffe-helper`** - Obtains SPIFFE Verifiable Identity Documents (SVIDs) from the SPIRE agent via the Workload API
-4. **`kagenti-client-registration`** - Registers the resource as an OAuth2 client in Keycloak using the SPIFFE identity
 
-All four sidecars are injected by default for eligible agent workloads. Each can be disabled independently via feature gates or per-workload labels.
+**Keycloak OAuth client registration** is performed by the **webhook** (not an injected sidecar): it calls Keycloak with registrar credentials (`KAGENTI_REGISTRAR_KEYCLOAK_USERNAME` / `KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD`), creates a namespace `Secret` named `kagenti-oauth-*` with `client-id.txt` and `client-secret.txt`, and mounts those files under `/shared` for Envoy / AuthBridge. The legacy **`kagenti-client-registration`** container is only used when webhook registration is disabled (e.g. `featureGates.clientRegistration: false` and `--enable-client-registration=false`).
+
+The three sidecars above are injected by default for eligible agent workloads. Each can be disabled independently via feature gates or per-workload labels.
 
 ### Why Sidecar Injection?
 

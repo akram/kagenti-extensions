@@ -18,6 +18,7 @@ package main
 
 import (
 	"crypto/tls"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -86,7 +87,7 @@ func main() {
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.BoolVar(&enableClientRegistration, "enable-client-registration", true,
-		"If set, Kagenti webhook will register tool clients in Keycloak")
+		"If set, Kagenti webhook will register OAuth clients in Keycloak (credentials from KAGENTI_REGISTRAR_KEYCLOAK_* env vars)")
 	flag.StringVar(&configPath, "config-path", "/etc/kagenti/config.yaml", "Path to platform config file")
 	flag.StringVar(&featureGatesPath, "feature-gates-path", "/etc/kagenti/feature-gates/feature-gates.yaml", "Path to feature gates config file")
 
@@ -95,6 +96,13 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	registrarUser := os.Getenv("KAGENTI_REGISTRAR_KEYCLOAK_USERNAME")
+	registrarPass := os.Getenv("KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD")
+	if enableClientRegistration && (registrarUser == "" || registrarPass == "") {
+		setupLog.Error(errors.New("missing env"), "enable-client-registration requires KAGENTI_REGISTRAR_KEYCLOAK_USERNAME and KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD")
+		os.Exit(1)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -276,6 +284,8 @@ func main() {
 		enableClientRegistration,
 		configLoader.Get,
 		featureGateLoader.Get,
+		registrarUser,
+		registrarPass,
 	)
 
 	// nolint:goconst

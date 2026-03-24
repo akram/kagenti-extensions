@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/kagenti/kagenti-extensions/kagenti-webhook/internal/webhook/config"
+	"github.com/kagenti/kagenti-extensions/kagenti-webhook/internal/webhook/registrar"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -31,9 +32,9 @@ var builderLog = logf.Log.WithName("container-builder")
 
 const (
 	// Container names for AuthBridge sidecars
-	EnvoyProxyContainerName  = "envoy-proxy"
-	ProxyInitContainerName   = "proxy-init"
-	AuthBridgeContainerName  = "authbridge"
+	EnvoyProxyContainerName = "envoy-proxy"
+	ProxyInitContainerName  = "proxy-init"
+	AuthBridgeContainerName = "authbridge"
 
 	// Client registration container configuration
 	// Keep in sync with AuthBridge/client-registration/Dockerfile
@@ -45,6 +46,9 @@ const (
 	// multiple containers with different UIDs to read/write shared files.
 	// All sidecar containers get this as a supplemental group ID.
 	SharedVolumesFSGroup = 1000
+
+	// OauthWorkloadVolumeName is the volume name for webhook-provisioned OAuth client files.
+	OauthWorkloadVolumeName = "kagenti-oauth-client"
 )
 
 // ContainerBuilder creates container specs from resolved config.
@@ -56,6 +60,8 @@ const (
 type ContainerBuilder struct {
 	cfg      *config.PlatformConfig
 	resolved *ResolvedConfig
+	// oauthWorkloadSecretName is set when the webhook pre-provisioned OAuth client credentials in this Secret.
+	oauthWorkloadSecretName string
 }
 
 // NewContainerBuilder creates a ContainerBuilder that uses ValueFrom refs
@@ -77,6 +83,35 @@ func NewResolvedContainerBuilder(resolved *ResolvedConfig) *ContainerBuilder {
 		cfg:      resolved.Platform,
 		resolved: resolved,
 	}
+}
+
+// WithOAuthWorkloadSecret configures mounts for Keycloak OAuth client material provisioned by the webhook.
+func (b *ContainerBuilder) WithOAuthWorkloadSecret(secretName string) *ContainerBuilder {
+	if b == nil {
+		return b
+	}
+	b.oauthWorkloadSecretName = secretName
+	return b
+}
+
+func (b *ContainerBuilder) appendOAuthFileMounts(mounts []corev1.VolumeMount) []corev1.VolumeMount {
+	if b.oauthWorkloadSecretName == "" {
+		return mounts
+	}
+	return append(mounts,
+		corev1.VolumeMount{
+			Name:      OauthWorkloadVolumeName,
+			MountPath: "/shared/client-id.txt",
+			SubPath:   registrar.WorkloadOAuthSecretKeyClientID,
+			ReadOnly:  true,
+		},
+		corev1.VolumeMount{
+			Name:      OauthWorkloadVolumeName,
+			MountPath: "/shared/client-secret.txt",
+			SubPath:   registrar.WorkloadOAuthSecretKeyClientSecret,
+			ReadOnly:  true,
+		},
+	)
 }
 
 func (b *ContainerBuilder) BuildSpiffeHelperContainer() corev1.Container {
@@ -396,6 +431,7 @@ func (b *ContainerBuilder) BuildEnvoyProxyContainerWithSpireOption(spireEnabled 
 			ReadOnly:  true,
 		})
 	}
+	volumeMounts = b.appendOAuthFileMounts(volumeMounts)
 
 	var env []corev1.EnvVar
 	if b.resolved != nil {
@@ -403,7 +439,6 @@ func (b *ContainerBuilder) BuildEnvoyProxyContainerWithSpireOption(spireEnabled 
 	} else {
 		env = b.buildEnvoyProxyEnvLegacy()
 	}
-
 
 	return corev1.Container{
 		Name:            EnvoyProxyContainerName,
@@ -609,6 +644,7 @@ func (b *ContainerBuilder) BuildAuthBridgeContainer(name, namespace string, spir
 			},
 		)
 	}
+	volumeMounts = b.appendOAuthFileMounts(volumeMounts)
 
 	return corev1.Container{
 		Name:            AuthBridgeContainerName,
@@ -648,15 +684,15 @@ func (b *ContainerBuilder) BuildAuthBridgeContainer(name, namespace string, spir
 
 // buildAuthBridgeEnvResolved returns env vars for the combined container from resolved config.
 func (b *ContainerBuilder) buildAuthBridgeEnvResolved(clientName string, spireEnabled, clientRegistrationEnabled bool) []corev1.EnvVar {
-	secretName := b.resolved.AdminCredentialsSecretName
-	if secretName == "" {
-		secretName = KeycloakAdminSecretName
+	regInPod := clientRegistrationEnabled
+	if b.oauthWorkloadSecretName != "" {
+		regInPod = false
 	}
 
 	env := []corev1.EnvVar{
 		// Control flags for the entrypoint
 		{Name: "SPIRE_ENABLED", Value: fmt.Sprintf("%t", spireEnabled)},
-		{Name: "CLIENT_REGISTRATION_ENABLED", Value: fmt.Sprintf("%t", clientRegistrationEnabled)},
+		{Name: "CLIENT_REGISTRATION_ENABLED", Value: fmt.Sprintf("%t", regInPod)},
 		// Envoy/go-processor env vars
 		{Name: "KEYCLOAK_URL", Value: b.resolved.KeycloakURL},
 		{Name: "KEYCLOAK_REALM", Value: b.resolved.KeycloakRealm},
@@ -669,8 +705,18 @@ func (b *ContainerBuilder) buildAuthBridgeEnvResolved(clientName string, spireEn
 		{Name: "CLIENT_SECRET_FILE", Value: "/shared/client-secret.txt"},
 		{Name: "ROUTES_CONFIG_PATH", Value: "/etc/authproxy/routes.yaml"},
 		{Name: "DEFAULT_OUTBOUND_POLICY", Value: b.resolved.DefaultOutboundPolicy},
+	}
+	if b.oauthWorkloadSecretName != "" {
+		return env
+	}
+
+	secretName := b.resolved.AdminCredentialsSecretName
+	if secretName == "" {
+		secretName = KeycloakAdminSecretName
+	}
+	env = append(env,
 		// Client-registration env vars (sensitive values stay as SecretKeyRef)
-		{
+		corev1.EnvVar{
 			Name: "KEYCLOAK_ADMIN_USERNAME",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
@@ -679,7 +725,7 @@ func (b *ContainerBuilder) buildAuthBridgeEnvResolved(clientName string, spireEn
 				},
 			},
 		},
-		{
+		corev1.EnvVar{
 			Name: "KEYCLOAK_ADMIN_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
@@ -688,20 +734,24 @@ func (b *ContainerBuilder) buildAuthBridgeEnvResolved(clientName string, spireEn
 				},
 			},
 		},
-		{Name: "CLIENT_NAME", Value: clientName},
-		{Name: "SECRET_FILE_PATH", Value: "/shared/client-secret.txt"},
-		{Name: "PLATFORM_CLIENT_IDS", Value: b.resolved.PlatformClientIDs},
-	}
+		corev1.EnvVar{Name: "CLIENT_NAME", Value: clientName},
+		corev1.EnvVar{Name: "SECRET_FILE_PATH", Value: "/shared/client-secret.txt"},
+		corev1.EnvVar{Name: "PLATFORM_CLIENT_IDS", Value: b.resolved.PlatformClientIDs},
+	)
 
 	return env
 }
 
 // buildAuthBridgeEnvLegacy returns ValueFrom-based env vars for the combined container.
 func (b *ContainerBuilder) buildAuthBridgeEnvLegacy(clientName string, spireEnabled, clientRegistrationEnabled bool) []corev1.EnvVar {
-	return []corev1.EnvVar{
+	regInPod := clientRegistrationEnabled
+	if b.oauthWorkloadSecretName != "" {
+		regInPod = false
+	}
+	env := []corev1.EnvVar{
 		// Control flags for the entrypoint
 		{Name: "SPIRE_ENABLED", Value: fmt.Sprintf("%t", spireEnabled)},
-		{Name: "CLIENT_REGISTRATION_ENABLED", Value: fmt.Sprintf("%t", clientRegistrationEnabled)},
+		{Name: "CLIENT_REGISTRATION_ENABLED", Value: fmt.Sprintf("%t", regInPod)},
 		// Envoy/go-processor env vars (from ConfigMap)
 		{
 			Name: "KEYCLOAK_URL",
@@ -786,8 +836,13 @@ func (b *ContainerBuilder) buildAuthBridgeEnvLegacy(clientName string, spireEnab
 				},
 			},
 		},
+	}
+	if b.oauthWorkloadSecretName != "" {
+		return env
+	}
+	env = append(env,
 		// Client-registration env vars
-		{
+		corev1.EnvVar{
 			Name: "KEYCLOAK_ADMIN_USERNAME",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
@@ -796,7 +851,7 @@ func (b *ContainerBuilder) buildAuthBridgeEnvLegacy(clientName string, spireEnab
 				},
 			},
 		},
-		{
+		corev1.EnvVar{
 			Name: "KEYCLOAK_ADMIN_PASSWORD",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{
@@ -805,9 +860,9 @@ func (b *ContainerBuilder) buildAuthBridgeEnvLegacy(clientName string, spireEnab
 				},
 			},
 		},
-		{Name: "CLIENT_NAME", Value: clientName},
-		{Name: "SECRET_FILE_PATH", Value: "/shared/client-secret.txt"},
-		{
+		corev1.EnvVar{Name: "CLIENT_NAME", Value: clientName},
+		corev1.EnvVar{Name: "SECRET_FILE_PATH", Value: "/shared/client-secret.txt"},
+		corev1.EnvVar{
 			Name: "PLATFORM_CLIENT_IDS",
 			ValueFrom: &corev1.EnvVarSource{
 				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
@@ -817,7 +872,8 @@ func (b *ContainerBuilder) buildAuthBridgeEnvLegacy(clientName string, spireEnab
 				},
 			},
 		},
-	}
+	)
+	return env
 }
 
 // BuildProxyInitContainer creates the init container that sets up iptables

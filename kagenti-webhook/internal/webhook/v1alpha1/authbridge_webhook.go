@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -76,6 +77,12 @@ func (w *AuthBridgeWebhook) Handle(ctx context.Context, req admission.Request) a
 	if err := w.decoder.Decode(req, &pod); err != nil {
 		authbridgelog.Error(err, "Failed to decode Pod")
 		return admission.Errored(http.StatusBadRequest, err)
+	}
+
+	if req.Namespace != "" && pod.Namespace != "" && req.Namespace != pod.Namespace {
+		authbridgelog.Info("Rejecting pod: namespace mismatch between request and object",
+			"requestNamespace", req.Namespace, "podNamespace", pod.Namespace)
+		return admission.Errored(http.StatusBadRequest, fmt.Errorf("namespace mismatch"))
 	}
 
 	// Derive a workload name for ServiceAccount and client-registration naming.

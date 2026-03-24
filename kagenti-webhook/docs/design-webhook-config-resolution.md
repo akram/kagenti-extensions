@@ -19,7 +19,7 @@ The kagenti-webhook injects AuthBridge sidecars into Pods at CREATE time. The in
 | Source | What it provides | How it's consumed today |
 |--------|-----------------|------------------------|
 | **Platform defaults** (`kagenti-webhook-defaults` ConfigMap) | Container images, proxy ports, resource limits | Loaded at startup, hot-reloaded via file watcher. Used by `ContainerBuilder` to set image, ports, resources. |
-| **Namespace ConfigMaps** (4 ConfigMaps + 1 Secret) | Keycloak URL/realm, token exchange params, envoy routing, SPIFFE helper config, admin credentials | Emitted as `ValueFrom` references in container env vars. Resolved by kubelet at Pod startup — **the webhook never reads these values**. |
+| **Namespace ConfigMaps** (4 ConfigMaps) | Keycloak URL/realm, token exchange params, envoy routing, SPIFFE helper config | Read at admission when `perWorkloadConfigResolution` is enabled; otherwise `ValueFrom` refs resolved by the kubelet. **Keycloak admin credentials are not mounted into workload pods**: the webhook registers OAuth clients using registrar credentials (`KAGENTI_REGISTRAR_KEYCLOAK_*`) and writes per-workload `kagenti-oauth-*` Secrets with `client-id.txt` / `client-secret.txt`. |
 | **AgentRuntime CR** (planned) | Per-workload identity and token exchange overrides | **Does not exist yet.** Will be defined in kagenti-operator. |
 
 ### Why this is a problem
@@ -75,7 +75,7 @@ Layer 4 (highest)   AgentRuntime CR .spec.identity + .spec.trace
 | Sidecar enable/disable | x | x | | |
 | Keycloak URL | | | x | |
 | Keycloak realm | | | x | x (via clientRegistration.realm) |
-| Keycloak admin creds | | | x | x (via clientRegistration.adminCredentialsSecret) |
+| Keycloak admin creds | | | (webhook registrar Secret, not workload namespaces) | x (via clientRegistration.adminCredentialsSecret) |
 | Token URL | | x | x | |
 | Issuer | | | x | |
 | Expected audience | | | x | |
@@ -98,7 +98,7 @@ The webhook reads these resources from the **target namespace** (the namespace w
 | Resource | Kind | Keys read by webhook |
 |----------|------|---------------------|
 | `authbridge-config` | ConfigMap | `KEYCLOAK_URL`, `KEYCLOAK_REALM`, `SPIRE_ENABLED`, `PLATFORM_CLIENT_IDS`, `TOKEN_URL`, `ISSUER`, `EXPECTED_AUDIENCE`, `TARGET_AUDIENCE`, `TARGET_SCOPES`, `DEFAULT_OUTBOUND_POLICY` |
-| `keycloak-admin-secret` | Secret | `KEYCLOAK_ADMIN_USERNAME`, `KEYCLOAK_ADMIN_PASSWORD` |
+| `keycloak-admin-secret` | Secret | **Deprecated for injected workloads.** Admin credentials live only on the webhook (see `config/manager/registrar_env.yaml`). Injected pods use the webhook-created `kagenti-oauth-*` Secret for OAuth client material. |
 | `spiffe-helper-config` | ConfigMap | `helper.conf` (full file content) |
 | `envoy-config` | ConfigMap | `envoy.yaml` (full file content, optional — if absent, webhook templates it) |
 | `authproxy-routes` | ConfigMap | `routes.yaml` (full file content, optional — per-host routing rules for go-processor) |
