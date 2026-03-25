@@ -4,11 +4,11 @@ This directory holds static manifests. The scripts under `scripts/openshift/` ap
 
 ## One-time: allow the webhook namespace to pull images
 
-If the webhook runs in another namespace (e.g. `kagenti-webhook-system`), grant pull access to ImageStreams in `kagenti-images`. **Skip this and pulls fail with `authentication required` / `ErrImagePull`.**
+If the webhook runs in another namespace (e.g. `kagenti-webhook-system`), grant pull access to ImageStreams in `kagenti-images`. **Skip this and pulls fail with `authentication required` / `ErrImagePull`.** The same applies to **each agent namespace** (e.g. `team1`) where injected pods use sidecar images from `kagenti-images`.
 
 ```bash
 chmod +x scripts/openshift/kagenti-images-grant-webhook-pull.sh
-./scripts/openshift/kagenti-images-grant-webhook-pull.sh
+AGENT_NAMESPACES="team1 team2" ./scripts/openshift/kagenti-images-grant-webhook-pull.sh
 ```
 
 Or manually:
