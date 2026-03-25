@@ -53,6 +53,8 @@ oc set env deployment/kagenti-webhook-controller-manager -n kagenti-webhook-syst
 
 `oc set env --from=secret/...` imports those keys as **`KEYCLOAK_ADMIN_USERNAME`** / **`KEYCLOAK_ADMIN_PASSWORD`**. The webhook reads those names (see `kagenti-webhook/cmd/main.go`).
 
+The registrar calls Keycloak’s **`master`** realm (`admin-cli` password grant). Values must be the **real Keycloak bootstrap admin** (e.g. RHBK **`keycloak-initial-admin`** in the Keycloak namespace — often username `temp-admin` and a generated password), **not** the Helm defaults `admin`/`admin` copied from agent namespaces unless those match Keycloak. If admission logs show `invalid_grant` / **Invalid user credentials**, refresh the webhook secret from `keycloak-initial-admin` and restart the deployment.
+
 **Or create the Secret by hand** in `kagenti-webhook-system` (same keys as the chart):
 
 ```bash
