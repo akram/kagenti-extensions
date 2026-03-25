@@ -27,6 +27,29 @@ oc rollout restart deployment/kagenti-webhook-controller-manager -n kagenti-webh
 
 The internal registry URL `image-registry.openshift-image-registry.svc:5000/kagenti-images/...` still requires authorization. Run the **`system:image-puller`** grant above (in **`kagenti-images`**, referencing **`system:serviceaccounts:<webhook-namespace>`**). If your webhook runs in a different namespace, set `WEBHOOK_NAMESPACE` when running the script or adjust the `oc policy` command.
 
+## Webhook: registrar credentials on an existing Deployment (`oc set env`)
+
+With client registration enabled, the manager needs Keycloak admin credentials. You can wire them the same way as before for workloads: a Secret whose keys are **`KEYCLOAK_ADMIN_USERNAME`** and **`KEYCLOAK_ADMIN_PASSWORD`** (e.g. the existing **`keycloak-admin-secret`** pattern). The Secret must be in the **same namespace** as the webhook deployment.
+
+`oc set env --from=secret/...` imports those keys as environment variables with the **same names**. The webhook accepts them directly (and still prefers **`KAGENTI_REGISTRAR_KEYCLOAK_*`** if you set those via Helm).
+
+```bash
+NS=kagenti-webhook-system
+SECRET=keycloak-admin-secret   # or copy the platform secret into $NS under this name
+
+oc set env deployment/kagenti-webhook-controller-manager -n "$NS" \
+  --from="secret/${SECRET}" \
+  --containers=manager
+```
+
+If the Secret lives only in another namespace (e.g. Keycloak or an agent namespace), copy it first, for example:
+
+```bash
+oc get secret keycloak-admin-secret -n keycloak -o yaml | \
+  sed '/namespace:/d;/resourceVersion:/d;/uid:/d' | \
+  oc apply -n kagenti-webhook-system -f -
+```
+
 ## Create namespace, ImageStreams, and BuildConfigs
 
 From the **kagenti-extensions** repo root:

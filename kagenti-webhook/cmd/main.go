@@ -100,9 +100,15 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	registrarUser := os.Getenv("KAGENTI_REGISTRAR_KEYCLOAK_USERNAME")
+	if registrarUser == "" {
+		registrarUser = os.Getenv("KEYCLOAK_ADMIN_USERNAME")
+	}
 	registrarPass := os.Getenv("KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD")
+	if registrarPass == "" {
+		registrarPass = os.Getenv("KEYCLOAK_ADMIN_PASSWORD")
+	}
 	if enableClientRegistration && (registrarUser == "" || registrarPass == "") {
-		setupLog.Error(errors.New("missing env"), "enable-client-registration requires KAGENTI_REGISTRAR_KEYCLOAK_USERNAME and KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD (set registrar.existingSecret in Helm or pass --enable-client-registration=false)")
+		setupLog.Error(errors.New("missing env"), "enable-client-registration requires Keycloak admin credentials: set KAGENTI_REGISTRAR_KEYCLOAK_USERNAME/PASSWORD or KEYCLOAK_ADMIN_USERNAME/PASSWORD (e.g. oc set env deployment/... --from=secret/keycloak-admin-secret --containers=manager)")
 		os.Exit(1)
 	}
 
