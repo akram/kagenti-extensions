@@ -4,11 +4,28 @@ This directory holds static manifests. The scripts under `scripts/openshift/` ap
 
 ## One-time: allow the webhook namespace to pull images
 
-If the webhook runs in another namespace (e.g. `kagenti-webhook-system`), grant pull access to ImageStreams in `kagenti-images`:
+If the webhook runs in another namespace (e.g. `kagenti-webhook-system`), grant pull access to ImageStreams in `kagenti-images`. **Skip this and pulls fail with `authentication required` / `ErrImagePull`.**
+
+```bash
+chmod +x scripts/openshift/kagenti-images-grant-webhook-pull.sh
+./scripts/openshift/kagenti-images-grant-webhook-pull.sh
+```
+
+Or manually:
 
 ```bash
 oc policy add-role-to-group system:image-puller system:serviceaccounts:kagenti-webhook-system -n kagenti-images
 ```
+
+Then restart the webhook if it was already in `ImagePullBackOff`:
+
+```bash
+oc rollout restart deployment/kagenti-webhook-controller-manager -n kagenti-webhook-system
+```
+
+### Troubleshooting: `Failed to pull image` / `authentication required`
+
+The internal registry URL `image-registry.openshift-image-registry.svc:5000/kagenti-images/...` still requires authorization. Run the **`system:image-puller`** grant above (in **`kagenti-images`**, referencing **`system:serviceaccounts:<webhook-namespace>`**). If your webhook runs in a different namespace, set `WEBHOOK_NAMESPACE` when running the script or adjust the `oc policy` command.
 
 ## Create namespace, ImageStreams, and BuildConfigs
 
