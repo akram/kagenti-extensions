@@ -93,6 +93,8 @@ Or a single image:
 oc start-build kagenti-webhook -n kagenti-images --follow
 ```
 
+After changing **`kagenti-webhook`** Go code, rebuild that BuildConfig and roll the deployment (or rely on `imagePullPolicy: Always` and `oc rollout restart` after the image updates).
+
 ## Upgrade existing Helm installation (webhook + sidecar image defaults)
 
 After builds succeed, point the chart at the internal registry and restart the deployment.

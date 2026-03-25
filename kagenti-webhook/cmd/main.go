@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -48,6 +49,18 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+// emitFatal logs to stderr (always visible in kubectl/oc logs) and via setupLog, then exits.
+func emitFatal(msg string, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %s: %v\n", msg, err)
+		setupLog.Error(err, msg)
+	} else {
+		fmt.Fprintf(os.Stderr, "FATAL: %s\n", msg)
+		setupLog.Error(errors.New("fatal"), msg)
+	}
+	os.Exit(1)
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -99,6 +112,14 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: panic in kagenti-webhook: %v\n", r)
+			setupLog.Error(fmt.Errorf("%v", r), "panic")
+			os.Exit(1)
+		}
+	}()
+
 	registrarUser := os.Getenv("KAGENTI_REGISTRAR_KEYCLOAK_USERNAME")
 	if registrarUser == "" {
 		registrarUser = os.Getenv("KEYCLOAK_ADMIN_USERNAME")
@@ -108,9 +129,16 @@ func main() {
 		registrarPass = os.Getenv("KEYCLOAK_ADMIN_PASSWORD")
 	}
 	if enableClientRegistration && (registrarUser == "" || registrarPass == "") {
-		setupLog.Error(errors.New("missing env"), "enable-client-registration requires Keycloak admin credentials: set KAGENTI_REGISTRAR_KEYCLOAK_USERNAME/PASSWORD or KEYCLOAK_ADMIN_USERNAME/PASSWORD (e.g. oc set env deployment/... --from=secret/keycloak-admin-secret --containers=manager)")
-		os.Exit(1)
+		emitFatal("enable-client-registration requires Keycloak admin credentials (KAGENTI_REGISTRAR_KEYCLOAK_* or KEYCLOAK_ADMIN_*); try: oc set env deployment/kagenti-webhook-controller-manager -n kagenti-webhook-system --from=secret/keycloak-admin-secret --containers=manager", errors.New("missing env"))
 	}
+
+	setupLog.Info("bootstrapping kagenti-webhook",
+		"configPath", configPath,
+		"featureGatesPath", featureGatesPath,
+		"webhookCertPath", webhookCertPath,
+		"enableClientRegistration", enableClientRegistration,
+		"metricsAddr", metricsAddr,
+		"probeAddr", probeAddr)
 
 	ctx := ctrl.SetupSignalHandler()
 
@@ -121,8 +149,7 @@ func main() {
 
 	// Load initial config
 	if err := configLoader.Load(); err != nil {
-		setupLog.Error(err, "Failed to load platform config")
-		os.Exit(1)
+		emitFatal("failed to load platform config", err)
 	}
 
 	// Register OnChange before Watch to avoid missing updates during startup
@@ -144,8 +171,7 @@ func main() {
 	featureGateLoader := config.NewFeatureGateLoader(featureGatesPath)
 
 	if err := featureGateLoader.Load(); err != nil {
-		setupLog.Error(err, "Failed to load feature gates")
-		os.Exit(1)
+		emitFatal("failed to load feature gates", err)
 	}
 
 	// Register OnChange before Watch to avoid missing updates during startup
@@ -193,8 +219,7 @@ func main() {
 			filepath.Join(webhookCertPath, webhookCertKey),
 		)
 		if err != nil {
-			setupLog.Error(err, "Failed to initialize webhook certificate watcher")
-			os.Exit(1)
+			emitFatal("failed to initialize webhook certificate watcher", err)
 		}
 
 		webhookTLSOpts = append(webhookTLSOpts, func(config *tls.Config) {
@@ -242,8 +267,7 @@ func main() {
 			filepath.Join(metricsCertPath, metricsCertKey),
 		)
 		if err != nil {
-			setupLog.Error(err, "to initialize metrics certificate watcher", "error", err)
-			os.Exit(1)
+			emitFatal("failed to initialize metrics certificate watcher", err)
 		}
 
 		metricsServerOptions.TLSOpts = append(metricsServerOptions.TLSOpts, func(config *tls.Config) {
@@ -251,7 +275,12 @@ func main() {
 		})
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig, err := ctrl.GetConfig()
+	if err != nil {
+		emitFatal("unable to load Kubernetes REST config (in-cluster or kubeconfig)", err)
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -271,8 +300,7 @@ func main() {
 		// LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
-		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
+		emitFatal("unable to start manager", err)
 	}
 
 	// Create Kubernetes client for namespace checking
@@ -280,8 +308,7 @@ func main() {
 		Scheme: mgr.GetScheme(),
 	})
 	if err != nil {
-		setupLog.Error(err, "unable to create Kubernetes client")
-		os.Exit(1)
+		emitFatal("unable to create Kubernetes client", err)
 	}
 
 	// Create shared pod mutator for all webhooks
@@ -298,8 +325,7 @@ func main() {
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
 		// Setup AuthBridge webhook
 		if err = webhookv1alpha1.SetupAuthBridgeWebhookWithManager(mgr, podMutator); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "AuthBridge")
-			os.Exit(1)
+			emitFatal("unable to create AuthBridge webhook", err)
 		}
 	}
 	// +kubebuilder:scaffold:builder
@@ -307,31 +333,26 @@ func main() {
 	if metricsCertWatcher != nil {
 		setupLog.Info("Adding metrics certificate watcher to manager")
 		if err := mgr.Add(metricsCertWatcher); err != nil {
-			setupLog.Error(err, "unable to add metrics certificate watcher to manager")
-			os.Exit(1)
+			emitFatal("unable to add metrics certificate watcher to manager", err)
 		}
 	}
 
 	if webhookCertWatcher != nil {
 		setupLog.Info("Adding webhook certificate watcher to manager")
 		if err := mgr.Add(webhookCertWatcher); err != nil {
-			setupLog.Error(err, "unable to add webhook certificate watcher to manager")
-			os.Exit(1)
+			emitFatal("unable to add webhook certificate watcher to manager", err)
 		}
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
-		os.Exit(1)
+		emitFatal("unable to set up health check", err)
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
-		os.Exit(1)
+		emitFatal("unable to set up ready check", err)
 	}
 
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
-		setupLog.Error(err, "problem running manager")
-		os.Exit(1)
+		emitFatal("problem running manager", err)
 	}
 }
