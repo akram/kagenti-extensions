@@ -27,12 +27,16 @@ webhook:
   port: 9443
 
 # Keycloak admin credentials used only by the webhook to register OAuth clients (not mounted into workload pods).
-# When webhook.enableClientRegistration is true, set existingSecret to a Secret in the webhook namespace
-# (e.g. create with KEYCLOAK_ADMIN_USERNAME / KEYCLOAK_ADMIN_PASSWORD keys).
+# When webhook.enableClientRegistration is true, either:
+#   - set existingSecret to a Secret in the webhook namespace (KEYCLOAK_ADMIN_USERNAME / KEYCLOAK_ADMIN_PASSWORD keys by default), or
+#   - set username and password below (plain env; dev/smoke only — use existingSecret in production).
 registrar:
   existingSecret: ""
   usernameKey: KEYCLOAK_ADMIN_USERNAME
   passwordKey: KEYCLOAK_ADMIN_PASSWORD
+  # Non-empty smoke-test defaults so the process passes env validation; Keycloak calls will fail until you use real creds or a Secret.
+  username: "rnd-u-8c4f1e9a2b7d3065"
+  password: "rnd-p-6a1e9c3f7b2d804e5a91c0f6e8d4b2a7"
 
 serviceAccount:
   create: true

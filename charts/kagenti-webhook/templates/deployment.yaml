@@ -57,7 +57,8 @@ spec:
           {{- toYaml .Values.readinessProbe | nindent 10 }}
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
-        {{- if and .Values.webhook.enableClientRegistration .Values.registrar.existingSecret }}
+        {{- if .Values.webhook.enableClientRegistration }}
+        {{- if .Values.registrar.existingSecret }}
         env:
         - name: KAGENTI_REGISTRAR_KEYCLOAK_USERNAME
           valueFrom:
@@ -69,6 +70,13 @@ spec:
             secretKeyRef:
               name: {{ .Values.registrar.existingSecret }}
               key: {{ .Values.registrar.passwordKey }}
+        {{- else if and .Values.registrar.username .Values.registrar.password }}
+        env:
+        - name: KAGENTI_REGISTRAR_KEYCLOAK_USERNAME
+          value: {{ .Values.registrar.username | quote }}
+        - name: KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD
+          value: {{ .Values.registrar.password | quote }}
+        {{- end }}
         {{- end }}
         volumeMounts:
         - mountPath: {{ .Values.webhook.certPath }}
