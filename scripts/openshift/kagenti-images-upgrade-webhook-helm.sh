@@ -56,6 +56,7 @@ helm upgrade "${RELEASE}" "${CHART}" \
   --create-namespace \
   --set "image.repository=${WEBHOOK_REPO}" \
   --set "image.tag=${TAG}" \
+  --set "image.pullPolicy=Always" \
   --set "defaults.images.envoyProxy=${ENVOY_REPO}:${TAG}" \
   --set "defaults.images.proxyInit=${PROXY_INIT_REPO}:${TAG}" \
   --set "defaults.images.authbridge=${AUTHBRIDGE_REPO}:${TAG}" \

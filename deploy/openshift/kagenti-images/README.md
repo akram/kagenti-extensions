@@ -44,7 +44,27 @@ oc start-build kagenti-webhook -n kagenti-images --follow
 
 ## Upgrade existing Helm installation (webhook + sidecar image defaults)
 
-After builds succeed, point the chart at the internal registry and restart the deployment:
+After builds succeed, point the chart at the internal registry and restart the deployment.
+
+### Umbrella `kagenti` release (typical platform install)
+
+If you installed the platform with `helm install kagenti .../kagenti/charts/kagenti` (release usually in `kagenti-system`), the webhook is the **`kagenti-webhook-chart` subchart**. Use:
+
+```bash
+# Expects ../kagenti/charts/kagenti relative to this repo, or set KAGENTI_CHART to that directory.
+export UMBRELLA_RELEASE=kagenti
+export UMBRELLA_NAMESPACE=kagenti-system
+# Optional: HELM_EXTRA_ARGS='--set kagenti-webhook-chart.registrar.existingSecret=kagenti-keycloak-registrar'
+
+chmod +x scripts/openshift/kagenti-images-upgrade-kagenti-umbrella-helm.sh
+./scripts/openshift/kagenti-images-upgrade-kagenti-umbrella-helm.sh
+```
+
+This sets `kagenti-webhook-chart.image` and `kagenti-webhook-chart.defaults.images.*` to `image-registry.openshift-image-registry.svc:5000/kagenti-images/...:latest`, restarts `kagenti-webhook-controller-manager`, and uses `image.pullPolicy=Always` so nodes repull `:latest`.
+
+**Already-running agent pods** keep their old sidecar images until you recreate them (e.g. `oc rollout restart deployment/<name> -n <agent-namespace>`).
+
+### Standalone webhook release only
 
 ```bash
 export HELM_RELEASE=kagenti-webhook          # your release name
@@ -55,11 +75,32 @@ chmod +x scripts/openshift/kagenti-images-upgrade-webhook-helm.sh
 ./scripts/openshift/kagenti-images-upgrade-webhook-helm.sh
 ```
 
-The script reads each ImageStream’s `status.dockerImageRepository`, runs `helm upgrade`, and `oc rollout restart` for the controller deployment.
+The scripts read each ImageStream’s `status.dockerImageRepository`, run `helm upgrade`, and restart the webhook deployment.
 
-### Manual Helm command (equivalent)
+### Manual Helm command (umbrella `kagenti`)
 
-If you prefer not to use the script, after builds complete:
+```bash
+NS_IMG=kagenti-images
+TAG=latest
+WEBHOOK_REPO=$(oc get is kagenti-webhook -n "$NS_IMG" -o jsonpath='{.status.dockerImageRepository}')
+P="kagenti-webhook-chart"
+helm upgrade kagenti /path/to/kagenti/charts/kagenti \
+  --namespace kagenti-system \
+  --reuse-values \
+  --set "${P}.image.repository=${WEBHOOK_REPO}" \
+  --set "${P}.image.tag=${TAG}" \
+  --set "${P}.image.pullPolicy=Always" \
+  --set "${P}.defaults.images.envoyProxy=$(oc get is envoy-with-processor -n "$NS_IMG" -o jsonpath='{.status.dockerImageRepository}'):${TAG}" \
+  --set "${P}.defaults.images.proxyInit=$(oc get is proxy-init -n "$NS_IMG" -o jsonpath='{.status.dockerImageRepository}'):${TAG}" \
+  --set "${P}.defaults.images.authbridge=$(oc get is authbridge -n "$NS_IMG" -o jsonpath='{.status.dockerImageRepository}'):${TAG}" \
+  --set "${P}.defaults.images.clientRegistration=$(oc get is client-registration -n "$NS_IMG" -o jsonpath='{.status.dockerImageRepository}'):${TAG}"
+
+oc rollout restart deployment/kagenti-webhook-controller-manager -n kagenti-webhook-system
+```
+
+### Manual Helm command (standalone webhook)
+
+Use `app.kubernetes.io/instance=<your-helm-release-name>` in the rollout selector.
 
 ```bash
 NS_IMG=kagenti-images
@@ -69,6 +110,7 @@ helm upgrade kagenti-webhook ./charts/kagenti-webhook \
   --namespace kagenti-webhook-system \
   --set image.repository="$WEBHOOK_REPO" \
   --set image.tag="$TAG" \
+  --set image.pullPolicy=Always \
   --set defaults.images.envoyProxy="$(oc get is envoy-with-processor -n "$NS_IMG" -o jsonpath='{.status.dockerImageRepository}'):$TAG" \
   --set defaults.images.proxyInit="$(oc get is proxy-init -n "$NS_IMG" -o jsonpath='{.status.dockerImageRepository}'):$TAG" \
   --set defaults.images.authbridge="$(oc get is authbridge -n "$NS_IMG" -o jsonpath='{.status.dockerImageRepository}'):$TAG" \
