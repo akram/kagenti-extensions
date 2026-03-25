@@ -29,25 +29,36 @@ The internal registry URL `image-registry.openshift-image-registry.svc:5000/kage
 
 ## Webhook: registrar credentials on an existing Deployment (`oc set env`)
 
-With client registration enabled, the manager needs Keycloak admin credentials. You can wire them the same way as before for workloads: a Secret whose keys are **`KEYCLOAK_ADMIN_USERNAME`** and **`KEYCLOAK_ADMIN_PASSWORD`** (e.g. the existing **`keycloak-admin-secret`** pattern). The Secret must be in the **same namespace** as the webhook deployment.
+With client registration enabled, the manager needs Keycloak admin credentials. You can wire them the same way as before for workloads: a Secret whose keys are **`KEYCLOAK_ADMIN_USERNAME`** and **`KEYCLOAK_ADMIN_PASSWORD`** (the **`keycloak-admin-secret`** pattern from the Kagenti chart). The Secret must be in the **same namespace** as the webhook deployment (`kagenti-webhook-system`).
 
-`oc set env --from=secret/...` imports those keys as environment variables with the **same names**. The webhook accepts them directly (and still prefers **`KAGENTI_REGISTRAR_KEYCLOAK_*`** if you set those via Helm).
+The platform Helm chart usually creates **`keycloak-admin-secret` in each agent namespace** (e.g. `team1`, `team2`), **not** in `kagenti-webhook-system`. If `oc set env ... --from=secret/keycloak-admin-secret` returns **NotFound**, find a copy and sync it into the webhook namespace first.
+
+**Find a source Secret:**
 
 ```bash
-NS=kagenti-webhook-system
-SECRET=keycloak-admin-secret   # or copy the platform secret into $NS under this name
+oc get secrets -A | grep -E 'keycloak-admin|KEYCLOAK' || true
+# Often: keycloak-admin-secret in team1 / team2 / your agent namespace
+```
 
-oc set env deployment/kagenti-webhook-controller-manager -n "$NS" \
-  --from="secret/${SECRET}" \
+**Copy into `kagenti-webhook-system` and wire the Deployment:**
+
+```bash
+chmod +x scripts/openshift/kagenti-webhook-sync-keycloak-admin-secret.sh
+./scripts/openshift/kagenti-webhook-sync-keycloak-admin-secret.sh team1   # use your agent namespace
+
+oc set env deployment/kagenti-webhook-controller-manager -n kagenti-webhook-system \
+  --from=secret/keycloak-admin-secret \
   --containers=manager
 ```
 
-If the Secret lives only in another namespace (e.g. Keycloak or an agent namespace), copy it first, for example:
+`oc set env --from=secret/...` imports those keys as **`KEYCLOAK_ADMIN_USERNAME`** / **`KEYCLOAK_ADMIN_PASSWORD`**. The webhook reads those names (see `kagenti-webhook/cmd/main.go`).
+
+**Or create the Secret by hand** in `kagenti-webhook-system` (same keys as the chart):
 
 ```bash
-oc get secret keycloak-admin-secret -n keycloak -o yaml | \
-  sed '/namespace:/d;/resourceVersion:/d;/uid:/d' | \
-  oc apply -n kagenti-webhook-system -f -
+oc create secret generic keycloak-admin-secret -n kagenti-webhook-system \
+  --from-literal=KEYCLOAK_ADMIN_USERNAME=admin \
+  --from-literal=KEYCLOAK_ADMIN_PASSWORD='your-admin-password'
 ```
 
 ## Create namespace, ImageStreams, and BuildConfigs
