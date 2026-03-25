@@ -97,14 +97,14 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
 	registrarUser := os.Getenv("KAGENTI_REGISTRAR_KEYCLOAK_USERNAME")
 	registrarPass := os.Getenv("KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD")
 	if enableClientRegistration && (registrarUser == "" || registrarPass == "") {
-		setupLog.Error(errors.New("missing env"), "enable-client-registration requires KAGENTI_REGISTRAR_KEYCLOAK_USERNAME and KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD")
+		setupLog.Error(errors.New("missing env"), "enable-client-registration requires KAGENTI_REGISTRAR_KEYCLOAK_USERNAME and KAGENTI_REGISTRAR_KEYCLOAK_PASSWORD (set registrar.existingSecret in Helm or pass --enable-client-registration=false)")
 		os.Exit(1)
 	}
-
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	ctx := ctrl.SetupSignalHandler()
 
