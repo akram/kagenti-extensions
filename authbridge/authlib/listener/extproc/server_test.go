@@ -552,13 +552,10 @@ func TestExtProc_BodyBuffering_Outbound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	inbound, err := plugintesting.BuildPipeline([]pipeline.Plugin{
-		plugintesting.NewJWTValidation(auth.New(auth.Config{
-			Verifier: &mockVerifier{claims: &validation.Claims{Subject: "user"}},
-			Identity: auth.IdentityConfig{Audiences: []string{"test"}},
-		}), false),
-	})
-	if err != nil {
+	inbound, err := plugins.DefaultInboundPipeline(auth.New(auth.Config{
+		Verifier: &mockVerifier{claims: &validation.Claims{Subject: "user"}},
+		Identity: auth.IdentityConfig{Audiences: []string{"test"}},
+	}))	if err != nil {
 		t.Fatal(err)
 	}
 
