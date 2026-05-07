@@ -23,12 +23,36 @@ import (
 // validate pattern.
 type jwtValidationConfig struct {
 	// Issuer is the JWT `iss` claim expected on inbound tokens.
+	// In split-horizon deployments this is the PUBLIC Keycloak URL
+	// (whatever Keycloak stamps into the `iss` claim) — it only needs
+	// to match bit-for-bit, not be reachable from inside the pod.
 	Issuer string `json:"issuer"`
 
 	// JWKSURL points at the JWKS endpoint used to verify signatures.
-	// When empty, derived from Issuer using Keycloak's convention
-	// (/protocol/openid-connect/certs).
+	// The sidecar actually GETs this URL from inside the cluster, so
+	// in split-horizon deployments it must be the INTERNAL Keycloak
+	// URL — not the public hostname from Issuer, which typically
+	// won't resolve from inside the mesh.
+	//
+	// When empty, the URL is derived with this priority:
+	//   1. KeycloakURL + KeycloakRealm (Keycloak convention; the
+	//      internal URL, when the operator supplies it)
+	//   2. Issuer (fallback for single-horizon deployments where the
+	//      issuer hostname is reachable from inside the cluster)
 	JWKSURL string `json:"jwks_url"`
+
+	// KeycloakURL and KeycloakRealm are a convenience for deriving
+	// JWKSURL from the internal Keycloak service URL, symmetric with
+	// token-exchange's fields of the same name. Prefer supplying these
+	// over JWKSURL when you also want the usual split-horizon behavior
+	// (public Issuer + internal JWKS fetch).
+	//
+	// Pre-PR-#378 the binary derived jwks_url from outbound.token_url
+	// via a cross-plugin pass; per-plugin configs don't share state,
+	// so each plugin now carries its own copy of the "where is
+	// Keycloak internally" hint.
+	KeycloakURL   string `json:"keycloak_url"`
+	KeycloakRealm string `json:"keycloak_realm"`
 
 	// Audience is the literal audience value expected on inbound
 	// tokens. One of {Audience, AudienceFile, AudienceMode:"per-host"}
@@ -57,8 +81,19 @@ type jwtValidationConfig struct {
 }
 
 func (c *jwtValidationConfig) applyDefaults() {
-	if c.JWKSURL == "" && c.Issuer != "" {
-		c.JWKSURL = strings.TrimRight(c.Issuer, "/") + "/protocol/openid-connect/certs"
+	// JWKSURL derivation priority:
+	//   1. Explicit JWKSURL wins.
+	//   2. KeycloakURL + KeycloakRealm → internal Keycloak URL (the
+	//      reachable host for JWKS fetching in split-horizon setups).
+	//   3. Issuer → same host as the token's iss claim (fine for
+	//      single-horizon deployments; breaks split-horizon).
+	if c.JWKSURL == "" {
+		if c.KeycloakURL != "" && c.KeycloakRealm != "" {
+			base := strings.TrimRight(c.KeycloakURL, "/") + "/realms/" + c.KeycloakRealm
+			c.JWKSURL = base + "/protocol/openid-connect/certs"
+		} else if c.Issuer != "" {
+			c.JWKSURL = strings.TrimRight(c.Issuer, "/") + "/protocol/openid-connect/certs"
+		}
 	}
 	if c.AudienceMode == "" {
 		c.AudienceMode = "static"
