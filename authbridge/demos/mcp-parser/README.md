@@ -77,37 +77,33 @@ metadata:
 data:
   config.yaml: |
     mode: envoy-sidecar
-    inbound:
-      issuer: "http://keycloak.localtest.me:8080/realms/kagenti"
-    outbound:
-      keycloak_url: "http://keycloak-service.keycloak.svc:8080"
-      keycloak_realm: "kagenti"
-      default_policy: "passthrough"
-    identity:
-      type: "spiffe"
-      client_id_file: "/shared/client-id.txt"
-      client_secret_file: "/shared/client-secret.txt"
-      jwt_svid_path: "/opt/jwt_svid.token"
-    bypass:
-      inbound_paths:
-        - "/.well-known/*"
-        - "/healthz"
-        - "/readyz"
-        - "/livez"
     pipeline:
       inbound:
         plugins:
-          - jwt-validation
+          - name: jwt-validation
+            config:
+              issuer: "http://keycloak.localtest.me:8080/realms/kagenti"
       outbound:
         plugins:
-          - token-exchange
+          - name: token-exchange
+            config:
+              keycloak_url: "http://keycloak-service.keycloak.svc:8080"
+              keycloak_realm: "kagenti"
+              identity:
+                type: "spiffe"
           - mcp-parser
 EOF
 ```
 
-> **Note**: The `pipeline` section is the only addition. All other fields
-> should match your existing `authbridge-runtime-config`. If you use
-> `client-secret` identity type instead of `spiffe`, adjust accordingly.
+> **Note**: Per-plugin config is the only supported shape. Top-level
+> `inbound:` / `outbound:` / `identity:` / `bypass:` blocks are no
+> longer accepted. Defaults (`audience_file=/shared/client-id.txt`,
+> `bypass_paths`=common probes, `jwt_svid_path=/opt/jwt_svid.token`,
+> `client_id_file=/shared/client-id.txt`, `default_policy=passthrough`,
+> `routes.file=/etc/authproxy/routes.yaml`) kick in for anything you
+> omit. For `client-secret` identity type, swap `type: spiffe` to
+> `type: client-secret` — the `client_secret_file` default activates
+> automatically.
 
 The `mcp-parser` is placed **after** `token-exchange` in the outbound
 pipeline. This means:

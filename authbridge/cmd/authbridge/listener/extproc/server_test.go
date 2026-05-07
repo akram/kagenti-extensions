@@ -19,7 +19,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/cache"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/exchange"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/validation"
@@ -64,11 +64,16 @@ func (v *mockVerifier) Verify(_ context.Context, _ string, _ string) (*validatio
 
 func serverFromAuth(t *testing.T, a *auth.Auth) *Server {
 	t.Helper()
-	inbound, err := plugins.DefaultInboundPipeline(a)
+	// Plugins build their own auth.Auth from local config in
+	// production. Tests inject a pre-built *auth.Auth via
+	// NewJWTValidationForTest / NewTokenExchangeForTest so the
+	// listener-level assertions don't have to care about the plugin's
+	// internal construction path.
+	inbound, err := plugintesting.BuildPipeline([]pipeline.Plugin{plugintesting.NewJWTValidation(a, false)})
 	if err != nil {
 		t.Fatalf("building inbound pipeline: %v", err)
 	}
-	outbound, err := plugins.DefaultOutboundPipeline(a)
+	outbound, err := plugintesting.BuildPipeline([]pipeline.Plugin{plugintesting.NewTokenExchange(a)})
 	if err != nil {
 		t.Fatalf("building outbound pipeline: %v", err)
 	}
@@ -384,7 +389,7 @@ func TestExtProc_BodyBuffering_Inbound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outbound, err := plugins.DefaultOutboundPipeline(auth.New(auth.Config{}))
+	outbound, err := plugintesting.BuildPipeline([]pipeline.Plugin{plugintesting.NewTokenExchange(auth.New(auth.Config{}))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,10 +452,12 @@ func TestExtProc_BodyBuffering_Outbound(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	inbound, err := plugins.DefaultInboundPipeline(auth.New(auth.Config{
-		Verifier: &mockVerifier{claims: &validation.Claims{Subject: "user"}},
-		Identity: auth.IdentityConfig{Audience: "test"},
-	}))
+	inbound, err := plugintesting.BuildPipeline([]pipeline.Plugin{
+		plugintesting.NewJWTValidation(auth.New(auth.Config{
+			Verifier: &mockVerifier{claims: &validation.Claims{Subject: "user"}},
+			Identity: auth.IdentityConfig{Audience: "test"},
+		}), false),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +506,7 @@ func TestExtProc_BodyTooLarge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outbound, err := plugins.DefaultOutboundPipeline(auth.New(auth.Config{}))
+	outbound, err := plugintesting.BuildPipeline([]pipeline.Plugin{plugintesting.NewTokenExchange(auth.New(auth.Config{}))})
 	if err != nil {
 		t.Fatal(err)
 	}
