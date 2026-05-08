@@ -28,12 +28,24 @@ func (p *A2AParser) Capabilities() pipeline.PluginCapabilities {
 func (p *A2AParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	if len(pctx.Body) == 0 {
 		slog.Debug("a2a-parser: no body, skipping")
+		appendInvocationInbound(pctx, pipeline.Invocation{
+			Plugin: "a2a-parser",
+			Action: pipeline.ActionSkip,
+			Reason: "no_body",
+			Path:   pctx.Path,
+		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
 	var rpc jsonRPCRequest
 	if err := json.Unmarshal(pctx.Body, &rpc); err != nil {
 		slog.Debug("a2a-parser: invalid JSON-RPC", "error", err, "bodyLen", len(pctx.Body))
+		appendInvocationInbound(pctx, pipeline.Invocation{
+			Plugin: "a2a-parser",
+			Action: pipeline.ActionSkip,
+			Reason: "invalid_json_rpc",
+			Path:   pctx.Path,
+		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -75,6 +87,12 @@ func (p *A2AParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	for i, part := range ext.Parts {
 		slog.Debug("a2a-parser: part", "index", i, "kind", part.Kind, "content", truncate(part.Content, debugBodyMax))
 	}
+	appendInvocationInbound(pctx, pipeline.Invocation{
+		Plugin: "a2a-parser",
+		Action: pipeline.ActionObserve,
+		Reason: "matched_" + rpc.Method,
+		Path:   pctx.Path,
+	})
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
@@ -85,6 +103,12 @@ func (p *A2AParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 // Handles both JSON-RPC responses (message/send) and SSE event streams (message/stream).
 func (p *A2AParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	if len(pctx.ResponseBody) == 0 || pctx.Extensions.A2A == nil {
+		appendInvocationInbound(pctx, pipeline.Invocation{
+			Plugin: "a2a-parser",
+			Action: pipeline.ActionSkip,
+			Reason: "no_response_body_or_request_not_parsed",
+			Path:   pctx.Path,
+		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -110,6 +134,12 @@ func (p *A2AParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeli
 		"artifactLen", len(pctx.Extensions.A2A.Artifact),
 		"error", pctx.Extensions.A2A.ErrorMessage,
 	)
+	appendInvocationInbound(pctx, pipeline.Invocation{
+		Plugin: "a2a-parser",
+		Action: pipeline.ActionObserve,
+		Reason: "matched_" + pctx.Extensions.A2A.Method + "_response",
+		Path:   pctx.Path,
+	})
 	return pipeline.Action{Type: pipeline.Continue}
 }
 

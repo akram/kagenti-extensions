@@ -28,12 +28,24 @@ func (p *MCPParser) Capabilities() pipeline.PluginCapabilities {
 func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	if len(pctx.Body) == 0 {
 		slog.Debug("mcp-parser: no body, skipping")
+		appendInvocationOutbound(pctx, pipeline.Invocation{
+			Plugin: "mcp-parser",
+			Action: pipeline.ActionSkip,
+			Reason: "no_body",
+			Path:   pctx.Path,
+		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
 	var rpc jsonRPCRequest
 	if err := json.Unmarshal(pctx.Body, &rpc); err != nil {
 		slog.Debug("mcp-parser: body is not valid JSON-RPC", "error", err, "bodyLen", len(pctx.Body))
+		appendInvocationOutbound(pctx, pipeline.Invocation{
+			Plugin: "mcp-parser",
+			Action: pipeline.ActionSkip,
+			Reason: "invalid_json",
+			Path:   pctx.Path,
+		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 	// Empty method → body parses as JSON but isn't a JSON-RPC request
@@ -43,6 +55,12 @@ func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	// see a phantom "mcp: {}" on every inference event.
 	if rpc.Method == "" {
 		slog.Debug("mcp-parser: body is JSON but not JSON-RPC, skipping", "bodyLen", len(pctx.Body))
+		appendInvocationOutbound(pctx, pipeline.Invocation{
+			Plugin: "mcp-parser",
+			Action: pipeline.ActionSkip,
+			Reason: "not_json_rpc",
+			Path:   pctx.Path,
+		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -55,17 +73,35 @@ func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	slog.Info("mcp-parser: request", "method", rpc.Method)
 	slog.Debug("mcp-parser: payload", "method", rpc.Method, "body", truncate(string(pctx.Body), debugBodyMax))
 
+	appendInvocationOutbound(pctx, pipeline.Invocation{
+		Plugin: "mcp-parser",
+		Action: pipeline.ActionObserve,
+		Reason: "matched_" + rpc.Method,
+		Path:   pctx.Path,
+	})
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
 func (p *MCPParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	if len(pctx.ResponseBody) == 0 || pctx.Extensions.MCP == nil {
+		appendInvocationOutbound(pctx, pipeline.Invocation{
+			Plugin: "mcp-parser",
+			Action: pipeline.ActionSkip,
+			Reason: "no_response_body_or_request_not_parsed",
+			Path:   pctx.Path,
+		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
 	rpc, ok := parseMCPResponse(pctx.ResponseBody)
 	if !ok {
 		slog.Debug("mcp-parser: response is not valid JSON-RPC or SSE", "bodyLen", len(pctx.ResponseBody))
+		appendInvocationOutbound(pctx, pipeline.Invocation{
+			Plugin: "mcp-parser",
+			Action: pipeline.ActionSkip,
+			Reason: "unparseable_response",
+			Path:   pctx.Path,
+		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -76,6 +112,12 @@ func (p *MCPParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeli
 			Data:    rpc.Error.Data,
 		}
 		slog.Info("mcp-parser: response error", "method", pctx.Extensions.MCP.Method, "code", rpc.Error.Code, "message", rpc.Error.Message)
+		appendInvocationOutbound(pctx, pipeline.Invocation{
+			Plugin: "mcp-parser",
+			Action: pipeline.ActionObserve,
+			Reason: "response_error",
+			Path:   pctx.Path,
+		})
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -85,6 +127,12 @@ func (p *MCPParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeli
 		slog.Debug("mcp-parser: response detail", "method", pctx.Extensions.MCP.Method, "body", truncate(string(pctx.ResponseBody), debugBodyMax))
 	}
 
+	appendInvocationOutbound(pctx, pipeline.Invocation{
+		Plugin: "mcp-parser",
+		Action: pipeline.ActionObserve,
+		Reason: "matched_" + pctx.Extensions.MCP.Method + "_response",
+		Path:   pctx.Path,
+	})
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
