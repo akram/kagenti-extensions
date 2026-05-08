@@ -19,6 +19,7 @@ func newEventsTable() table.Model {
 			{Title: "TIME", Width: 12},
 			{Title: "DIR", Width: 4},
 			{Title: "PHASE", Width: 6},
+			{Title: "AUTH", Width: 8},
 			{Title: "PROTO", Width: 5},
 			{Title: "METHOD", Width: 22},
 			{Title: "STATUS", Width: 7},
@@ -76,6 +77,7 @@ func (m *model) rebuildEventsTable() {
 			e.At.Format("15:04:05.00"),
 			shortDirection(e.Direction),
 			phase,
+			authCell(e),
 			shortProto(e),
 			eventMethod(e),
 			statusCell(e),
@@ -125,10 +127,38 @@ func shortDirection(d pipeline.Direction) string {
 }
 
 func shortPhase(p pipeline.SessionPhase) string {
-	if p == pipeline.SessionRequest {
+	switch p {
+	case pipeline.SessionRequest:
 		return "req"
+	case pipeline.SessionResponse:
+		return "resp"
+	case pipeline.SessionDenied:
+		return "deny"
 	}
-	return "resp"
+	return "?"
+}
+
+// authCell summarizes the event's Auth decision for the events table.
+// Prefers Inbound over Outbound since only one direction populates per
+// event. Returns "—" when no auth plugin ran (e.g. an unparsed outbound
+// call with no route, or an inbound probe a bypass pattern skipped and
+// no Auth entry was written). Empty screen real estate deliberately —
+// "—" is two columns narrower than "bypass", and most rows don't have
+// auth info.
+func authCell(e pipeline.SessionEvent) string {
+	if e.Auth == nil {
+		return "—"
+	}
+	if len(e.Auth.Inbound) > 0 {
+		// Usually 1 entry; if chained plugins populated multiple, the
+		// last is the most recent decision. abctl's detail pane
+		// surfaces the full slice; the column shows the latest.
+		return e.Auth.Inbound[len(e.Auth.Inbound)-1].Decision
+	}
+	if len(e.Auth.Outbound) > 0 {
+		return e.Auth.Outbound[len(e.Auth.Outbound)-1].Action
+	}
+	return "—"
 }
 
 // shortProto classifies an event by which extension carries meaningful
@@ -203,9 +233,44 @@ func truncStr(s string, n int) string {
 }
 
 // matchEvent does a case-insensitive substring match across every string
-// field the operator might reasonably search for.
+// field the operator might reasonably search for. Also handles two
+// special prefixes:
+//
+//   - `deny` alone (common abbreviation) matches any SessionDenied event
+//     or any event whose auth decision is "deny" / "denied". Gives
+//     abctl users a one-word filter for "show me the failures."
+//   - `plugin:<name>` matches events whose Plugins map contains <name>.
 func matchEvent(e pipeline.SessionEvent, q string) bool {
 	q = strings.ToLower(q)
+
+	// Denial shortcut: "deny" matches both the terminal SessionDenied
+	// phase AND outbound-denied actions (token-exchange failures).
+	if q == "deny" {
+		if e.Phase == pipeline.SessionDenied {
+			return true
+		}
+		if e.Auth != nil {
+			for _, ib := range e.Auth.Inbound {
+				if ib.Decision == "deny" {
+					return true
+				}
+			}
+			for _, ob := range e.Auth.Outbound {
+				if ob.Action == "denied" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// Plugin shortcut: "plugin:foo" matches events that carry an entry
+	// under the foo key in the escape-hatch Plugins map.
+	if after, ok := strings.CutPrefix(q, "plugin:"); ok {
+		_, present := e.Plugins[after]
+		return present
+	}
+
 	hay := []string{e.Host, e.TargetAudience, shortProto(e), eventMethod(e)}
 	if e.Identity != nil {
 		hay = append(hay, e.Identity.Subject, e.Identity.ClientID)
@@ -221,6 +286,18 @@ func matchEvent(e pipeline.SessionEvent, q string) bool {
 	}
 	if e.Inference != nil {
 		hay = append(hay, e.Inference.Completion, e.Inference.FinishReason)
+	}
+	// Surface auth-decision context in the substring search too so
+	// `/jwt_failed` or `/expected-issuer=...` matches naturally.
+	if e.Auth != nil {
+		for _, ib := range e.Auth.Inbound {
+			hay = append(hay, ib.Plugin, ib.Decision, ib.Reason,
+				ib.ExpectedIssuer, ib.ExpectedAudience, ib.TokenSubject)
+		}
+		for _, ob := range e.Auth.Outbound {
+			hay = append(hay, ob.Plugin, ob.Action, ob.Reason,
+				ob.RouteHost, ob.TargetAudience)
+		}
 	}
 	for _, s := range hay {
 		if strings.Contains(strings.ToLower(s), q) {
