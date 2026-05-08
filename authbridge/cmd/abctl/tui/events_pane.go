@@ -20,7 +20,7 @@ func newEventsTable() table.Model {
 			{Title: "DIR", Width: 4},
 			{Title: "PHASE", Width: 6},
 			{Title: "AUTH", Width: 8},
-			{Title: "PROTO", Width: 5},
+			{Title: "PLUGIN", Width: 26},
 			{Title: "METHOD", Width: 22},
 			{Title: "STATUS", Width: 7},
 			{Title: "DURATION", Width: 10},
@@ -78,7 +78,7 @@ func (m *model) rebuildEventsTable() {
 			shortDirection(e.Direction),
 			phase,
 			authCell(e),
-			shortProto(e),
+			truncStr(responsiblePlugin(e), 26),
 			eventMethod(e),
 			statusCell(e),
 			durationCell(e),
@@ -161,24 +161,54 @@ func authCell(e pipeline.SessionEvent) string {
 	return "—"
 }
 
-// shortProto classifies an event by which extension carries meaningful
-// metadata. Inference wins over MCP when both are present: mcp-parser
-// greedily accepts any JSON as JSON-RPC (often with an empty method on
-// LLM request bodies) and sets MCPExtension, so an LLM call shows up
-// with both MCP{method:""} and Inference{model:...}. Picking inference
-// first surfaces the more specific truth.
-func shortProto(e pipeline.SessionEvent) string {
+// responsiblePlugin names every plugin that attached data to this event,
+// joined with "+". Used for the PLUGIN column in abctl.
+//
+// A single row can carry contributions from multiple plugins — e.g. an
+// inbound A2A request passes jwt-validation (Auth) AND a2a-parser (A2A
+// extension), so the row should name both. Naming only the "most
+// distinctive" plugin would bury the auth plugin entirely and make
+// operators question whether it ran at all.
+//
+// Order — parsers first, then auth plugins, then escape-hatch map keys —
+// matches the "what the traffic is" → "whether it was permitted" →
+// "extra context" progression so the most-informative name comes first.
+// Inference wins over MCP (mcp-parser greedy-matches any JSON-RPC,
+// producing an empty-method MCP{} false positive on LLM request bodies);
+// picking inference-parser first surfaces the more specific truth.
+//
+// Chained auth plugins within one direction collapse to the LAST entry
+// since that's the final decision — authCell uses the same rule.
+//
+// The pairing function requires this string to match across a request
+// and its response. Both phases snapshot Auth + extensions onto the
+// event, so parser+auth pairs have matching names on both sides.
+func responsiblePlugin(e pipeline.SessionEvent) string {
+	var names []string
 	switch {
 	case e.A2A != nil:
-		return "a2a"
+		names = append(names, "a2a-parser")
 	case e.Inference != nil:
-		return "inf"
+		names = append(names, "inference-parser")
 	case e.MCP != nil && e.MCP.Method != "":
-		return "mcp"
-	case e.MCP != nil:
-		return "—" // empty-method MCP = mcp-parser false-positive
+		names = append(names, "mcp-parser")
 	}
-	return "—"
+	if e.Auth != nil {
+		if n := len(e.Auth.Inbound); n > 0 {
+			names = append(names, e.Auth.Inbound[n-1].Plugin)
+		}
+		if n := len(e.Auth.Outbound); n > 0 {
+			names = append(names, e.Auth.Outbound[n-1].Plugin)
+		}
+	}
+	for k := range e.Plugins {
+		names = append(names, k)
+		break
+	}
+	if len(names) == 0 {
+		return "—"
+	}
+	return strings.Join(names, "+")
 }
 
 func eventMethod(e pipeline.SessionEvent) string {
@@ -271,7 +301,7 @@ func matchEvent(e pipeline.SessionEvent, q string) bool {
 		return present
 	}
 
-	hay := []string{e.Host, e.TargetAudience, shortProto(e), eventMethod(e)}
+	hay := []string{e.Host, e.TargetAudience, responsiblePlugin(e), eventMethod(e)}
 	if e.Identity != nil {
 		hay = append(hay, e.Identity.Subject, e.Identity.ClientID)
 	}
@@ -337,7 +367,7 @@ func pairRequestsAndResponses(events []pipeline.SessionEvent) map[int]int {
 			if resp.Direction != req.Direction {
 				continue
 			}
-			if shortProto(resp) != shortProto(req) {
+			if responsiblePlugin(resp) != responsiblePlugin(req) {
 				continue
 			}
 			if eventMethod(resp) != eventMethod(req) {
