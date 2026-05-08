@@ -294,6 +294,17 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 
 	result := p.inner.HandleInbound(ctx, authHeader, path, audience)
 	if result.Action == auth.ActionDeny {
+		// Surface the decision on pctx BEFORE returning so the listener's
+		// reject path can record a SessionDenied event with diagnostic
+		// context (why the token failed, what was expected). Never put
+		// the raw token here — session store has no auth.
+		appendInboundAuth(pctx, pipeline.InboundAuth{
+			Plugin:           "jwt-validation",
+			Decision:         "deny",
+			Reason:           result.DenyReasonCode.String(),
+			ExpectedIssuer:   p.cfg.Issuer,
+			ExpectedAudience: audience,
+		})
 		// result.DenyReason carries the specific failure (missing header,
 		// audience mismatch, expired, etc.). Pick a code whose default
 		// HTTP status matches what auth returned, so the fallback body is
@@ -305,8 +316,43 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		}
 		return pipeline.DenyStatus(result.DenyStatus, code, result.DenyReason)
 	}
+
+	// ActionAllow with nil Claims = bypass path (e.g., /healthz). Record
+	// as a bypass event so operators can still see the request in the
+	// session stream — useful for debugging "why is this URL skipping
+	// JWT?" without hunting through slog lines.
+	if result.Claims == nil {
+		appendInboundAuth(pctx, pipeline.InboundAuth{
+			Plugin:   "jwt-validation",
+			Decision: "bypass",
+			Reason:   "path_bypass",
+		})
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
+	// ActionAllow with Claims = authorized. Surface what the plugin
+	// VERIFIED in the token — diverges from the top-level Identity
+	// snapshot if later plugins re-annotate pctx.Claims.
 	pctx.Claims = result.Claims
+	appendInboundAuth(pctx, pipeline.InboundAuth{
+		Plugin:        "jwt-validation",
+		Decision:      "allow",
+		Reason:        auth.APPROVE_AUTHORIZED.String(),
+		TokenSubject:  result.Claims.Subject,
+		TokenAudience: result.Claims.Audience,
+		TokenScopes:   result.Claims.Scopes,
+	})
 	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// appendInboundAuth lazy-creates pctx.Extensions.Auth and appends one
+// entry under Inbound. Symmetric with how a2a-parser initializes its
+// extension slot in OnRequest.
+func appendInboundAuth(pctx *pipeline.Context, entry pipeline.InboundAuth) {
+	if pctx.Extensions.Auth == nil {
+		pctx.Extensions.Auth = &pipeline.AuthExtension{}
+	}
+	pctx.Extensions.Auth.Inbound = append(pctx.Extensions.Auth.Inbound, entry)
 }
 
 func (p *JWTValidation) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {

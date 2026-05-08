@@ -10,8 +10,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/validation"
 )
 
 // TestAuthbridgeCombinedYAML_Loads asserts that the in-repo default
@@ -305,6 +308,130 @@ func TestJWTValidation_OnRequest_NotConfigured(t *testing.T) {
 	action := p.OnRequest(context.Background(), &pipeline.Context{Headers: http.Header{}})
 	if action.Type != pipeline.Reject {
 		t.Errorf("got %v, want Reject for unconfigured plugin", action.Type)
+	}
+}
+
+// --- JWTValidation: Auth extension population ---
+//
+// These tests verify jwt-validation surfaces its decision on
+// pctx.Extensions.Auth.Inbound so the listener can record a
+// SessionEvent reflecting allow/deny/bypass. Plumbed through a
+// mockVerifier injected into p.inner (instead of spinning up a real
+// JWKS server) — keeps the test focused on plugin behavior, not crypto.
+
+// mockJWTVerifier lets the tests below dictate what the inner validator
+// returns without standing up an httptest JWKS server. It implements the
+// validation.Verifier interface.
+type mockJWTVerifier struct {
+	claims *validation.Claims
+	err    error
+}
+
+func (m *mockJWTVerifier) Verify(_ context.Context, _, _ string) (*validation.Claims, error) {
+	return m.claims, m.err
+}
+
+// newTestJWTValidation constructs a JWTValidation plugin without calling
+// Configure — skips file I/O (audience_file polling, bypass pattern
+// compile via config) and lets each test wire a tailored inner auth.Auth.
+func newTestJWTValidation(t *testing.T, issuer string, inner *auth.Auth) *JWTValidation {
+	t.Helper()
+	p := NewJWTValidation()
+	p.cfg.Issuer = issuer
+	p.inner = inner
+	return p
+}
+
+func TestJWTValidation_OnRequest_PopulatesAuth_Bypass(t *testing.T) {
+	matcher, _ := bypass.NewMatcher(bypass.DefaultPatterns)
+	inner := auth.New(auth.Config{
+		Bypass:   matcher,
+		Verifier: &mockJWTVerifier{claims: &validation.Claims{Subject: "s"}},
+		Identity: auth.IdentityConfig{Audience: "agent-aud"},
+	})
+	p := newTestJWTValidation(t, "http://issuer", inner)
+
+	pctx := &pipeline.Context{Headers: http.Header{}, Path: "/healthz"}
+	action := p.OnRequest(context.Background(), pctx)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("bypass should Continue, got %v", action.Type)
+	}
+	if pctx.Extensions.Auth == nil || len(pctx.Extensions.Auth.Inbound) != 1 {
+		t.Fatalf("expected one Auth.Inbound entry, got %+v", pctx.Extensions.Auth)
+	}
+	got := pctx.Extensions.Auth.Inbound[0]
+	if got.Plugin != "jwt-validation" {
+		t.Errorf("Plugin = %q, want jwt-validation", got.Plugin)
+	}
+	if got.Decision != "bypass" || got.Reason != "path_bypass" {
+		t.Errorf("got Decision=%q Reason=%q, want bypass/path_bypass", got.Decision, got.Reason)
+	}
+}
+
+func TestJWTValidation_OnRequest_PopulatesAuth_Deny_NoHeader(t *testing.T) {
+	inner := auth.New(auth.Config{
+		Verifier: &mockJWTVerifier{},
+		Identity: auth.IdentityConfig{Audience: "agent-aud"},
+	})
+	p := newTestJWTValidation(t, "http://issuer.example", inner)
+
+	pctx := &pipeline.Context{Headers: http.Header{}, Path: "/api/call"}
+	action := p.OnRequest(context.Background(), pctx)
+	if action.Type != pipeline.Reject {
+		t.Fatalf("expected Reject on missing auth header, got %v", action.Type)
+	}
+	if pctx.Extensions.Auth == nil || len(pctx.Extensions.Auth.Inbound) != 1 {
+		t.Fatalf("expected one Auth.Inbound entry, got %+v", pctx.Extensions.Auth)
+	}
+	got := pctx.Extensions.Auth.Inbound[0]
+	if got.Decision != "deny" {
+		t.Errorf("Decision = %q, want deny", got.Decision)
+	}
+	// Reason comes from InboundDenialReason.String() so consumers can
+	// filter on a machine-stable code without parsing English.
+	if got.Reason != "no_header" {
+		t.Errorf("Reason = %q, want no_header", got.Reason)
+	}
+	if got.ExpectedIssuer != "http://issuer.example" {
+		t.Errorf("ExpectedIssuer = %q, want http://issuer.example", got.ExpectedIssuer)
+	}
+}
+
+func TestJWTValidation_OnRequest_PopulatesAuth_Allow(t *testing.T) {
+	claims := &validation.Claims{
+		Subject:  "alice",
+		Issuer:   "http://issuer.example",
+		Audience: []string{"agent-aud"},
+		ClientID: "caller",
+		Scopes:   []string{"openid", "write"},
+	}
+	inner := auth.New(auth.Config{
+		Verifier: &mockJWTVerifier{claims: claims},
+		Identity: auth.IdentityConfig{Audience: "agent-aud"},
+	})
+	p := newTestJWTValidation(t, "http://issuer.example", inner)
+
+	pctx := &pipeline.Context{Headers: http.Header{}, Path: "/api/call"}
+	pctx.Headers.Set("Authorization", "Bearer tok")
+	action := p.OnRequest(context.Background(), pctx)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue, got %v (violation=%+v)", action.Type, action.Violation)
+	}
+	if pctx.Extensions.Auth == nil || len(pctx.Extensions.Auth.Inbound) != 1 {
+		t.Fatalf("expected one Auth.Inbound entry, got %+v", pctx.Extensions.Auth)
+	}
+	got := pctx.Extensions.Auth.Inbound[0]
+	if got.Decision != "allow" || got.Reason != "authorized" {
+		t.Errorf("got Decision=%q Reason=%q, want allow/authorized", got.Decision, got.Reason)
+	}
+	if got.TokenSubject != "alice" {
+		t.Errorf("TokenSubject = %q, want alice", got.TokenSubject)
+	}
+	if len(got.TokenScopes) != 2 || got.TokenScopes[0] != "openid" {
+		t.Errorf("TokenScopes = %v, want [openid write]", got.TokenScopes)
+	}
+	if len(got.TokenAudience) != 1 || got.TokenAudience[0] != "agent-aud" {
+		t.Errorf("TokenAudience = %v, want [agent-aud]", got.TokenAudience)
 	}
 }
 
