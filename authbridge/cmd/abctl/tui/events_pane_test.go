@@ -8,7 +8,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 )
 
-// TestShortPhase_Denied locks the abctl rendering string for the new
+// TestShortPhase_Denied locks the abctl rendering string for the
 // denied phase — changing this silently would ripple into the events
 // table and teatest snapshots.
 func TestShortPhase_Denied(t *testing.T) {
@@ -17,253 +17,232 @@ func TestShortPhase_Denied(t *testing.T) {
 	}
 }
 
-// TestAuthCell covers the column renderer for every shape an event's
-// Auth extension can take: nil (common), inbound-only (jwt-validation
-// decisions), outbound-only (token-exchange actions), last-wins for
-// chained plugins.
-func TestAuthCell(t *testing.T) {
+// TestInvocationRow_Cells exercises the ACTION and PLUGIN column
+// renderers for each shape a row can take: an Invocation with an action,
+// multiple invocations (the row is per-invocation, each carries only
+// its own plugin), and the pseudo-row fallback when an event has no
+// Invocations at all.
+func TestInvocationRow_Cells(t *testing.T) {
+	evWithInv := &pipeline.SessionEvent{
+		Invocations: &pipeline.Invocations{
+			Inbound: []pipeline.Invocation{
+				{Plugin: "jwt-validation", Action: pipeline.ActionAllow},
+				{Plugin: "a2a-parser", Action: pipeline.ActionObserve},
+			},
+		},
+	}
 	cases := []struct {
-		name string
-		ev   pipeline.SessionEvent
-		want string
+		name       string
+		row        invocationRow
+		wantAction string
+		wantPlugin string
 	}{
 		{
-			name: "no auth extension",
-			ev:   pipeline.SessionEvent{},
-			want: "—",
+			name:       "empty pseudo-row",
+			row:        invocationRow{event: &pipeline.SessionEvent{}},
+			wantAction: "—",
+			wantPlugin: "—",
 		},
 		{
 			name: "inbound allow",
-			ev: pipeline.SessionEvent{Auth: &pipeline.AuthExtension{
-				Inbound: []pipeline.InboundAuth{{Decision: "allow"}},
-			}},
-			want: "allow",
+			row: invocationRow{
+				event:     evWithInv,
+				inv:       &evWithInv.Invocations.Inbound[0],
+				direction: pipeline.Inbound,
+			},
+			wantAction: "allow",
+			wantPlugin: "jwt-validation",
 		},
 		{
-			name: "inbound deny",
-			ev: pipeline.SessionEvent{Auth: &pipeline.AuthExtension{
-				Inbound: []pipeline.InboundAuth{{Decision: "deny"}},
-			}},
-			want: "deny",
-		},
-		{
-			name: "inbound bypass",
-			ev: pipeline.SessionEvent{Auth: &pipeline.AuthExtension{
-				Inbound: []pipeline.InboundAuth{{Decision: "bypass"}},
-			}},
-			want: "bypass",
-		},
-		{
-			name: "outbound exchange",
-			ev: pipeline.SessionEvent{Auth: &pipeline.AuthExtension{
-				Outbound: []pipeline.OutboundAuth{{Action: "exchange"}},
-			}},
-			want: "exchange",
-		},
-		{
-			name: "outbound denied",
-			ev: pipeline.SessionEvent{Auth: &pipeline.AuthExtension{
-				Outbound: []pipeline.OutboundAuth{{Action: "denied"}},
-			}},
-			want: "denied",
-		},
-		{
-			name: "last-wins on chain",
-			ev: pipeline.SessionEvent{Auth: &pipeline.AuthExtension{
-				Inbound: []pipeline.InboundAuth{
-					{Plugin: "jwt-validation", Decision: "allow"},
-					{Plugin: "mtls-verifier", Decision: "deny"},
-				},
-			}},
-			want: "deny", // most recent decision shown; detail pane shows the full slice
+			name: "inbound observe (parser)",
+			row: invocationRow{
+				event:     evWithInv,
+				inv:       &evWithInv.Invocations.Inbound[1],
+				direction: pipeline.Inbound,
+			},
+			wantAction: "observe",
+			wantPlugin: "a2a-parser",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := authCell(tc.ev); got != tc.want {
-				t.Errorf("authCell = %q, want %q", got, tc.want)
+			if got := tc.row.actionCell(); got != tc.wantAction {
+				t.Errorf("actionCell = %q, want %q", got, tc.wantAction)
+			}
+			if got := tc.row.pluginCell(); got != tc.wantPlugin {
+				t.Errorf("pluginCell = %q, want %q", got, tc.wantPlugin)
 			}
 		})
 	}
 }
 
-// TestMatchEvent_DenyShortcut verifies that typing "deny" in the filter
-// box surfaces both the new SessionDenied phase AND outbound failures
-// (which fall under Auth.Outbound[].Action="denied"). This is the
-// one-word way to answer "what's failing auth?" from abctl.
-func TestMatchEvent_DenyShortcut(t *testing.T) {
-	denied := pipeline.SessionEvent{Phase: pipeline.SessionDenied}
-	if !matchEvent(denied, "deny") {
+// TestFlattenInvocations covers the core expansion: an event with N
+// invocations should produce N rows; an event with zero invocations
+// should still produce one pseudo-row so the event stays reachable.
+func TestFlattenInvocations(t *testing.T) {
+	events := []pipeline.SessionEvent{
+		// 2 inbound invocations → 2 rows
+		{
+			Direction: pipeline.Inbound,
+			Invocations: &pipeline.Invocations{
+				Inbound: []pipeline.Invocation{
+					{Plugin: "jwt-validation", Action: pipeline.ActionAllow},
+					{Plugin: "a2a-parser", Action: pipeline.ActionObserve},
+				},
+			},
+		},
+		// 1 outbound invocation → 1 row
+		{
+			Direction: pipeline.Outbound,
+			Invocations: &pipeline.Invocations{
+				Outbound: []pipeline.Invocation{
+					{Plugin: "token-exchange", Action: pipeline.ActionSkip},
+				},
+			},
+		},
+		// no invocations → 1 pseudo-row
+		{Direction: pipeline.Inbound},
+	}
+	got := flattenInvocations(events)
+	if len(got) != 4 {
+		t.Fatalf("flattenInvocations returned %d rows, want 4", len(got))
+	}
+	if got[0].inv == nil || got[0].inv.Plugin != "jwt-validation" {
+		t.Errorf("row 0 = %+v, want jwt-validation", got[0])
+	}
+	if got[1].inv == nil || got[1].inv.Plugin != "a2a-parser" {
+		t.Errorf("row 1 = %+v, want a2a-parser", got[1])
+	}
+	if got[2].inv == nil || got[2].inv.Plugin != "token-exchange" {
+		t.Errorf("row 2 = %+v, want token-exchange", got[2])
+	}
+	if got[3].inv != nil {
+		t.Errorf("row 3 should be pseudo-row with nil inv, got %+v", got[3])
+	}
+}
+
+// TestPairInvocationRows verifies that each plugin's request row pairs
+// with its own response row independently. A pipeline with
+// jwt-validation + a2a-parser on both request and response phases yields
+// 4 rows (2 req + 2 resp), and pairing should connect them in-plugin:
+// jwt-validation-req ↔ jwt-validation-resp; a2a-parser-req ↔
+// a2a-parser-resp.
+func TestPairInvocationRows(t *testing.T) {
+	inv := func(plugin string, action pipeline.InvocationAction) *pipeline.Invocation {
+		return &pipeline.Invocation{Plugin: plugin, Action: action}
+	}
+	reqEv := &pipeline.SessionEvent{Direction: pipeline.Inbound, Phase: pipeline.SessionRequest}
+	respEv := &pipeline.SessionEvent{Direction: pipeline.Inbound, Phase: pipeline.SessionResponse}
+	rows := []invocationRow{
+		{event: reqEv, inv: inv("jwt-validation", pipeline.ActionAllow), direction: pipeline.Inbound},
+		{event: reqEv, inv: inv("a2a-parser", pipeline.ActionObserve), direction: pipeline.Inbound},
+		{event: respEv, inv: inv("jwt-validation", pipeline.ActionAllow), direction: pipeline.Inbound},
+		{event: respEv, inv: inv("a2a-parser", pipeline.ActionObserve), direction: pipeline.Inbound},
+	}
+	pairs := pairInvocationRows(rows)
+	if pairs[0] != 2 || pairs[2] != 0 {
+		t.Errorf("expected jwt-validation pair 0↔2, got %v", pairs)
+	}
+	if pairs[1] != 3 || pairs[3] != 1 {
+		t.Errorf("expected a2a-parser pair 1↔3, got %v", pairs)
+	}
+}
+
+// TestMatchInvocationRow_DenyShortcut verifies that typing "deny" in the
+// filter box surfaces both the SessionDenied phase AND any invocation
+// whose Action is ActionDeny (jwt-validation or token-exchange
+// denials).
+func TestMatchInvocationRow_DenyShortcut(t *testing.T) {
+	denied := invocationRow{
+		event: &pipeline.SessionEvent{Phase: pipeline.SessionDenied},
+	}
+	if !matchInvocationRow(denied, "deny") {
 		t.Error("SessionDenied event should match the `deny` shortcut")
 	}
 
-	inboundDeny := pipeline.SessionEvent{
-		Phase: pipeline.SessionRequest,
-		Auth: &pipeline.AuthExtension{Inbound: []pipeline.InboundAuth{{
-			Decision: "deny",
-		}}},
+	inboundDeny := invocationRow{
+		event: &pipeline.SessionEvent{Phase: pipeline.SessionRequest},
+		inv:   &pipeline.Invocation{Action: pipeline.ActionDeny},
 	}
-	if !matchEvent(inboundDeny, "deny") {
-		t.Error("inbound-deny event should match the `deny` shortcut")
+	if !matchInvocationRow(inboundDeny, "deny") {
+		t.Error("inbound-deny invocation should match the `deny` shortcut")
 	}
 
-	outboundDenied := pipeline.SessionEvent{
-		Phase: pipeline.SessionRequest,
-		Auth: &pipeline.AuthExtension{Outbound: []pipeline.OutboundAuth{{
-			Action: "denied",
-		}}},
+	clean := invocationRow{
+		event: &pipeline.SessionEvent{Phase: pipeline.SessionRequest},
+		inv:   &pipeline.Invocation{Action: pipeline.ActionAllow},
 	}
-	if !matchEvent(outboundDenied, "deny") {
-		t.Error("outbound-denied event should match the `deny` shortcut")
-	}
-
-	clean := pipeline.SessionEvent{
-		Phase: pipeline.SessionRequest,
-		Auth: &pipeline.AuthExtension{Inbound: []pipeline.InboundAuth{{
-			Decision: "allow",
-		}}},
-	}
-	if matchEvent(clean, "deny") {
-		t.Error("allow event should NOT match the `deny` shortcut")
+	if matchInvocationRow(clean, "deny") {
+		t.Error("allow invocation should NOT match the `deny` shortcut")
 	}
 }
 
-// TestAuthOnlyRequestResponsePairing covers the auth-only case:
-// when a pipeline runs jwt-validation (or any Auth-only plugin) with no
-// body parser, the listener records BOTH a request and a response
-// event. Neither carries A2A/MCP/Inference — both populate Auth only.
-// Verify that:
-//
-//  1. The pairing function pairs them (sequential, matching on
-//     responsiblePlugin which falls back to the auth plugin name).
-//  2. authCell surfaces the auth decision on the response row too
-//     (recordInboundResponseSession snapshots Auth onto the event).
-//  3. statusCell and durationCell render the response metadata.
-func TestAuthOnlyRequestResponsePairing(t *testing.T) {
-	now := time.Date(2026, 5, 8, 14, 22, 5, 0, time.UTC)
-	auth := &pipeline.AuthExtension{
-		Inbound: []pipeline.InboundAuth{{Plugin: "jwt-validation", Decision: "allow"}},
+// TestMatchInvocationRow_PluginSubstring verifies that filtering by plugin
+// name substring-matches against the Invocation.Plugin field so operators
+// can isolate one plugin's rows.
+func TestMatchInvocationRow_PluginSubstring(t *testing.T) {
+	row := invocationRow{
+		event: &pipeline.SessionEvent{Phase: pipeline.SessionRequest},
+		inv:   &pipeline.Invocation{Plugin: "jwt-validation", Action: pipeline.ActionSkip, Reason: "path_bypass", Path: "/healthz"},
 	}
-	events := []pipeline.SessionEvent{
-		{At: now, Direction: pipeline.Inbound, Phase: pipeline.SessionRequest, Auth: auth, Host: "weather-agent"},
-		{At: now.Add(12 * time.Millisecond), Direction: pipeline.Inbound, Phase: pipeline.SessionResponse, Auth: auth, Host: "weather-agent", StatusCode: 200, Duration: 12 * time.Millisecond},
+	if !matchInvocationRow(row, "jwt-validation") {
+		t.Error("filter jwt-validation should match")
 	}
-
-	pairs := pairRequestsAndResponses(events)
-	if pairs[0] != 1 || pairs[1] != 0 {
-		t.Fatalf("expected auth-only req/resp to pair sequentially, got %v", pairs)
+	if !matchInvocationRow(row, "path_bypass") {
+		t.Error("filter by reason should match")
 	}
-
-	if got := authCell(events[1]); got != "allow" {
-		t.Errorf("authCell(response) = %q, want allow", got)
+	if !matchInvocationRow(row, "/healthz") {
+		t.Error("filter by path should match")
 	}
-	if got := statusCell(events[1]); got != "200" {
-		t.Errorf("statusCell = %q, want 200", got)
-	}
-	if got := durationCell(events[1]); got != "12ms" {
-		t.Errorf("durationCell = %q, want 12ms", got)
-	}
-
-	// Auth-only events have no parser; responsiblePlugin falls back
-	// to the auth plugin name on both sides — the identity the
-	// pairing function matches on.
-	if got := responsiblePlugin(events[0]); got != "jwt-validation" {
-		t.Errorf("responsiblePlugin(request) = %q, want jwt-validation", got)
-	}
-	if responsiblePlugin(events[0]) != responsiblePlugin(events[1]) {
-		t.Errorf("auth-only req/resp disagree on responsiblePlugin: %q vs %q",
-			responsiblePlugin(events[0]), responsiblePlugin(events[1]))
+	if matchInvocationRow(row, "token-exchange") {
+		t.Error("filter token-exchange should NOT match a jwt-validation row")
 	}
 }
 
-// TestResponsiblePlugin_Naming locks the PLUGIN column attribution:
-// every plugin that attached data is named (joined with "+"), with
-// parsers listed before auth plugins. Plugins map is the last-resort
-// escape hatch when no parser and no auth plugin ran.
-func TestResponsiblePlugin_Naming(t *testing.T) {
-	cases := []struct {
-		name string
-		ev   pipeline.SessionEvent
-		want string
-	}{
-		{
-			name: "a2a parser and jwt-validation both named",
-			ev: pipeline.SessionEvent{
-				A2A: &pipeline.A2AExtension{Method: "message/stream"},
-				Auth: &pipeline.AuthExtension{Inbound: []pipeline.InboundAuth{
-					{Plugin: "jwt-validation", Decision: "allow"},
-				}},
-			},
-			want: "a2a-parser+jwt-validation",
-		},
-		{
-			name: "inference wins over mcp false positive",
-			ev: pipeline.SessionEvent{
-				MCP:       &pipeline.MCPExtension{Method: ""},
-				Inference: &pipeline.InferenceExtension{Model: "llama3"},
-			},
-			want: "inference-parser",
-		},
-		{
-			name: "mcp with method claims the row",
-			ev:   pipeline.SessionEvent{MCP: &pipeline.MCPExtension{Method: "tools/call"}},
-			want: "mcp-parser",
-		},
-		{
-			name: "auth fallback picks last inbound plugin",
-			ev: pipeline.SessionEvent{Auth: &pipeline.AuthExtension{Inbound: []pipeline.InboundAuth{
-				{Plugin: "jwt-validation", Decision: "allow"},
-				{Plugin: "mtls-verifier", Decision: "deny"},
-			}}},
-			want: "mtls-verifier",
-		},
-		{
-			name: "auth fallback picks outbound when inbound empty",
-			ev: pipeline.SessionEvent{Auth: &pipeline.AuthExtension{Outbound: []pipeline.OutboundAuth{
-				{Plugin: "token-exchange", Action: "exchange"},
-			}}},
-			want: "token-exchange",
-		},
-		{
-			name: "plugins map is the last-resort fallback",
-			ev: pipeline.SessionEvent{Plugins: map[string]json.RawMessage{
+// TestMatchInvocationRow_PluginPrefix tests the `plugin:<name>` escape-
+// hatch filter — matches when the event's Plugins map contains <name>.
+func TestMatchInvocationRow_PluginPrefix(t *testing.T) {
+	row := invocationRow{
+		event: &pipeline.SessionEvent{
+			Plugins: map[string]json.RawMessage{
 				"rate-limiter": json.RawMessage(`{"allowed":true}`),
-			}},
-			want: "rate-limiter",
-		},
-		{
-			name: "empty event renders dash",
-			ev:   pipeline.SessionEvent{},
-			want: "—",
+			},
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := responsiblePlugin(tc.ev); got != tc.want {
-				t.Errorf("responsiblePlugin = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-
-// TestMatchEvent_PluginShortcut filters by plugin key in the escape-hatch
-// Plugins map — `plugin:rate-limiter` shows only events carrying that
-// plugin's event entries.
-func TestMatchEvent_PluginShortcut(t *testing.T) {
-	withPlugin := pipeline.SessionEvent{
-		Plugins: map[string]json.RawMessage{
-			"rate-limiter": json.RawMessage(`{"allowed":true}`),
-		},
-	}
-	if !matchEvent(withPlugin, "plugin:rate-limiter") {
+	if !matchInvocationRow(row, "plugin:rate-limiter") {
 		t.Error("expected match on plugin:rate-limiter")
 	}
-	if matchEvent(withPlugin, "plugin:nonexistent") {
+	if matchInvocationRow(row, "plugin:nonexistent") {
 		t.Error("expected no match for a plugin not in the map")
 	}
-	bare := pipeline.SessionEvent{}
-	if matchEvent(bare, "plugin:rate-limiter") {
-		t.Error("event without Plugins map should not match")
+}
+
+// Build a realistic auth-only request/response pair and assert that the
+// flatten → pair pipeline connects them end-to-end. Regression-protects
+// the chart-default case (jwt-validation only, no parsers).
+func TestFlattenPair_AuthOnlyEndToEnd(t *testing.T) {
+	now := time.Date(2026, 5, 8, 14, 22, 5, 0, time.UTC)
+	invs := &pipeline.Invocations{Inbound: []pipeline.Invocation{{Plugin: "jwt-validation", Action: pipeline.ActionAllow}}}
+	events := []pipeline.SessionEvent{
+		{At: now, Direction: pipeline.Inbound, Phase: pipeline.SessionRequest, Invocations: invs, Host: "weather-agent"},
+		{At: now.Add(12 * time.Millisecond), Direction: pipeline.Inbound, Phase: pipeline.SessionResponse, Invocations: invs, Host: "weather-agent", StatusCode: 200, Duration: 12 * time.Millisecond},
+	}
+
+	rows := flattenInvocations(events)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+	pairs := pairInvocationRows(rows)
+	if pairs[0] != 1 || pairs[1] != 0 {
+		t.Errorf("expected auth-only req/resp to pair: got %v", pairs)
+	}
+	if got := rows[0].actionCell(); got != "allow" {
+		t.Errorf("req actionCell = %q, want allow", got)
+	}
+	if got := rows[1].pluginCell(); got != "jwt-validation" {
+		t.Errorf("resp pluginCell = %q, want jwt-validation", got)
+	}
+	if got := statusCell(*rows[1].event); got != "200" {
+		t.Errorf("statusCell = %q, want 200", got)
 	}
 }

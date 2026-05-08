@@ -123,6 +123,12 @@ type model struct {
 	detailPlugin *apiclient.PipelinePlugin
 	filterInput  textinput.Model
 
+	// visibleRows holds the invocationRow spec for each rendered row in
+	// eventsTbl. Populated by rebuildEventsTable so selectedEvent can
+	// return the (event, invocation) tuple the cursor is on without
+	// re-walking the cache. Reset on every rebuild.
+	visibleRows []invocationRow
+
 	// pipeline is the fetched plugin composition. nil until the initial
 	// GetPipeline response arrives; the pipeline pane shows "(loading…)"
 	// until then.

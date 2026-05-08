@@ -19,8 +19,8 @@ func newEventsTable() table.Model {
 			{Title: "TIME", Width: 12},
 			{Title: "DIR", Width: 4},
 			{Title: "PHASE", Width: 6},
-			{Title: "AUTH", Width: 8},
-			{Title: "PLUGIN", Width: 26},
+			{Title: "ACTION", Width: 8},
+			{Title: "PLUGIN", Width: 18},
 			{Title: "METHOD", Width: 22},
 			{Title: "STATUS", Width: 7},
 			{Title: "DURATION", Width: 10},
@@ -56,35 +56,46 @@ func (m *model) rebuildEventsTable() {
 	prevRow := m.eventsTbl.Cursor()
 	wasAtEnd := prevRow >= len(m.eventsTbl.Rows())-1
 
-	// Compute request↔response pairs up-front so response rows can render
-	// a visual connector back to their request.
-	pairs := pairRequestsAndResponses(events)
+	// Flatten (event, invocation) into row specs up-front so pair-linking
+	// and filtering can run against the flat row list. Events without
+	// invocations fall back to a single pseudo-row (unusual — the listener
+	// only records events that have at least one Invocation or A2A/MCP/
+	// Inference extension, but parser-only events can still land here if
+	// the parser populated its extension without emitting an Invocation).
+	rowSpecs := flattenInvocations(events)
 
-	rows := make([]table.Row, 0, len(events))
-	for i, e := range events {
-		if m.filter != "" && !matchEvent(e, m.filter) {
+	// Pair request/response rows by (direction, plugin) so each plugin's
+	// contribution on the request side connects to its contribution on the
+	// response side, independent of other plugins in the same pipeline.
+	pairs := pairInvocationRows(rowSpecs)
+
+	rows := make([]table.Row, 0, len(rowSpecs))
+	m.visibleRows = m.visibleRows[:0]
+	for i, rs := range rowSpecs {
+		if m.filter != "" && !matchInvocationRow(rs, m.filter) {
 			continue
 		}
-		phase := shortPhase(e.Phase)
-		if e.Phase == pipeline.SessionResponse {
+		phase := shortPhase(rs.event.Phase)
+		if rs.event.Phase == pipeline.SessionResponse {
 			if _, paired := pairs[i]; paired {
-				// └ prefix visually connects the response to its request
-				// in the row above (or earlier, if filtered).
+				// └ prefix visually connects the response row to its
+				// request row in the same (direction, plugin) pair.
 				phase = "└" + phase
 			}
 		}
 		rows = append(rows, table.Row{
-			e.At.Format("15:04:05.00"),
-			shortDirection(e.Direction),
+			rs.event.At.Format("15:04:05.00"),
+			shortDirection(rs.event.Direction),
 			phase,
-			authCell(e),
-			truncStr(responsiblePlugin(e), 26),
-			eventMethod(e),
-			statusCell(e),
-			durationCell(e),
-			tokensCell(e),
-			truncStr(e.Host, 20),
+			rs.actionCell(),
+			truncStr(rs.pluginCell(), 18),
+			eventMethod(*rs.event),
+			statusCell(*rs.event),
+			durationCell(*rs.event),
+			tokensCell(*rs.event),
+			truncStr(rs.event.Host, 20),
 		})
+		m.visibleRows = append(m.visibleRows, rs)
 	}
 	m.eventsTbl.SetRows(rows)
 
@@ -97,26 +108,78 @@ func (m *model) rebuildEventsTable() {
 	}
 }
 
-// selectedEvent returns the event at the cursor row, or nil.
+// selectedEvent returns the event at the cursor row, or nil. The cursor
+// points into m.visibleRows (the flattened row list), and each row carries
+// a reference to its source event.
 func (m *model) selectedEvent() *pipeline.SessionEvent {
-	rows := m.eventsTbl.Rows()
-	if len(rows) == 0 {
+	if len(m.visibleRows) == 0 {
 		return nil
 	}
 	cur := m.eventsTbl.Cursor()
-	// Re-walk the cache to find the cur'th filtered event.
-	events := m.events[m.selectedSess]
-	idx := 0
+	if cur < 0 || cur >= len(m.visibleRows) {
+		return nil
+	}
+	return m.visibleRows[cur].event
+}
+
+// invocationRow is one table row — the cartesian product of SessionEvent
+// × Invocation. An event with N plugin invocations produces N rows; an
+// event with no invocations produces one row with an empty invocation.
+// Rendering and filtering both work off this flat list.
+type invocationRow struct {
+	event *pipeline.SessionEvent
+	// inv may be nil when the event has no Invocation records. The
+	// pseudo-row still renders so the event is reachable in the table.
+	inv *pipeline.Invocation
+	// direction is the Invocations.{Inbound,Outbound} this row came
+	// from, disambiguating when a single event somehow carries both
+	// (doesn't happen today but cheap to be explicit).
+	direction pipeline.Direction
+}
+
+func (r invocationRow) actionCell() string {
+	if r.inv == nil {
+		return "—"
+	}
+	return string(r.inv.Action)
+}
+
+func (r invocationRow) pluginCell() string {
+	if r.inv == nil {
+		return "—"
+	}
+	return r.inv.Plugin
+}
+
+// flattenInvocations walks the event slice in order and, for each event,
+// emits one invocationRow per Invocation it carries (Inbound then
+// Outbound). Events with no Invocations fall back to a single pseudo-row
+// so parser-only events (a SessionEvent carrying just MCP or A2A with no
+// matching Invocation) remain reachable.
+func flattenInvocations(events []pipeline.SessionEvent) []invocationRow {
+	out := make([]invocationRow, 0, len(events))
 	for i := range events {
-		if m.filter != "" && !matchEvent(events[i], m.filter) {
+		e := &events[i]
+		if e.Invocations == nil || (len(e.Invocations.Inbound) == 0 && len(e.Invocations.Outbound) == 0) {
+			out = append(out, invocationRow{event: e, direction: e.Direction})
 			continue
 		}
-		if idx == cur {
-			return &events[i]
+		for j := range e.Invocations.Inbound {
+			out = append(out, invocationRow{
+				event:     e,
+				inv:       &e.Invocations.Inbound[j],
+				direction: pipeline.Inbound,
+			})
 		}
-		idx++
+		for j := range e.Invocations.Outbound {
+			out = append(out, invocationRow{
+				event:     e,
+				inv:       &e.Invocations.Outbound[j],
+				direction: pipeline.Outbound,
+			})
+		}
 	}
-	return nil
+	return out
 }
 
 func shortDirection(d pipeline.Direction) string {
@@ -138,78 +201,9 @@ func shortPhase(p pipeline.SessionPhase) string {
 	return "?"
 }
 
-// authCell summarizes the event's Auth decision for the events table.
-// Prefers Inbound over Outbound since only one direction populates per
-// event. Returns "—" when no auth plugin ran (e.g. an unparsed outbound
-// call with no route, or an inbound probe a bypass pattern skipped and
-// no Auth entry was written). Empty screen real estate deliberately —
-// "—" is two columns narrower than "bypass", and most rows don't have
-// auth info.
-func authCell(e pipeline.SessionEvent) string {
-	if e.Auth == nil {
-		return "—"
-	}
-	if len(e.Auth.Inbound) > 0 {
-		// Usually 1 entry; if chained plugins populated multiple, the
-		// last is the most recent decision. abctl's detail pane
-		// surfaces the full slice; the column shows the latest.
-		return e.Auth.Inbound[len(e.Auth.Inbound)-1].Decision
-	}
-	if len(e.Auth.Outbound) > 0 {
-		return e.Auth.Outbound[len(e.Auth.Outbound)-1].Action
-	}
-	return "—"
-}
-
-// responsiblePlugin names every plugin that attached data to this event,
-// joined with "+". Used for the PLUGIN column in abctl.
-//
-// A single row can carry contributions from multiple plugins — e.g. an
-// inbound A2A request passes jwt-validation (Auth) AND a2a-parser (A2A
-// extension), so the row should name both. Naming only the "most
-// distinctive" plugin would bury the auth plugin entirely and make
-// operators question whether it ran at all.
-//
-// Order — parsers first, then auth plugins, then escape-hatch map keys —
-// matches the "what the traffic is" → "whether it was permitted" →
-// "extra context" progression so the most-informative name comes first.
-// Inference wins over MCP (mcp-parser greedy-matches any JSON-RPC,
-// producing an empty-method MCP{} false positive on LLM request bodies);
-// picking inference-parser first surfaces the more specific truth.
-//
-// Chained auth plugins within one direction collapse to the LAST entry
-// since that's the final decision — authCell uses the same rule.
-//
-// The pairing function requires this string to match across a request
-// and its response. Both phases snapshot Auth + extensions onto the
-// event, so parser+auth pairs have matching names on both sides.
-func responsiblePlugin(e pipeline.SessionEvent) string {
-	var names []string
-	switch {
-	case e.A2A != nil:
-		names = append(names, "a2a-parser")
-	case e.Inference != nil:
-		names = append(names, "inference-parser")
-	case e.MCP != nil && e.MCP.Method != "":
-		names = append(names, "mcp-parser")
-	}
-	if e.Auth != nil {
-		if n := len(e.Auth.Inbound); n > 0 {
-			names = append(names, e.Auth.Inbound[n-1].Plugin)
-		}
-		if n := len(e.Auth.Outbound); n > 0 {
-			names = append(names, e.Auth.Outbound[n-1].Plugin)
-		}
-	}
-	for k := range e.Plugins {
-		names = append(names, k)
-		break
-	}
-	if len(names) == 0 {
-		return "—"
-	}
-	return strings.Join(names, "+")
-}
+// (authCell and responsiblePlugin are gone — their roles moved onto
+// invocationRow's actionCell/pluginCell because each row now corresponds
+// to exactly one plugin's invocation rather than a whole event.)
 
 func eventMethod(e pipeline.SessionEvent) string {
 	switch {
@@ -262,46 +256,42 @@ func truncStr(s string, n int) string {
 	return s[:n-1] + "…"
 }
 
-// matchEvent does a case-insensitive substring match across every string
-// field the operator might reasonably search for. Also handles two
-// special prefixes:
+// matchInvocationRow does a case-insensitive substring match across every
+// string field the operator might reasonably search for — the invocation's
+// own fields plus the containing event's protocol extensions. Two prefix
+// shortcuts:
 //
-//   - `deny` alone (common abbreviation) matches any SessionDenied event
-//     or any event whose auth decision is "deny" / "denied". Gives
-//     abctl users a one-word filter for "show me the failures."
-//   - `plugin:<name>` matches events whose Plugins map contains <name>.
-func matchEvent(e pipeline.SessionEvent, q string) bool {
+//   - `deny` alone matches SessionDenied events and any invocation
+//     whose Action == ActionDeny — the one-word "show me failures"
+//     filter.
+//   - `plugin:<name>` matches rows whose escape-hatch Plugins map on
+//     the parent event has <name> as a key.
+func matchInvocationRow(r invocationRow, q string) bool {
 	q = strings.ToLower(q)
 
-	// Denial shortcut: "deny" matches both the terminal SessionDenied
-	// phase AND outbound-denied actions (token-exchange failures).
 	if q == "deny" {
-		if e.Phase == pipeline.SessionDenied {
+		if r.event.Phase == pipeline.SessionDenied {
 			return true
 		}
-		if e.Auth != nil {
-			for _, ib := range e.Auth.Inbound {
-				if ib.Decision == "deny" {
-					return true
-				}
-			}
-			for _, ob := range e.Auth.Outbound {
-				if ob.Action == "denied" {
-					return true
-				}
-			}
+		if r.inv != nil && r.inv.Action == pipeline.ActionDeny {
+			return true
 		}
 		return false
 	}
 
-	// Plugin shortcut: "plugin:foo" matches events that carry an entry
-	// under the foo key in the escape-hatch Plugins map.
 	if after, ok := strings.CutPrefix(q, "plugin:"); ok {
-		_, present := e.Plugins[after]
+		_, present := r.event.Plugins[after]
 		return present
 	}
 
-	hay := []string{e.Host, e.TargetAudience, responsiblePlugin(e), eventMethod(e)}
+	e := r.event
+	hay := []string{e.Host, e.TargetAudience, eventMethod(*e)}
+	if r.inv != nil {
+		hay = append(hay,
+			r.inv.Plugin, string(r.inv.Action), r.inv.Reason, r.inv.Path,
+			r.inv.ExpectedIssuer, r.inv.ExpectedAudience, r.inv.TokenSubject,
+			r.inv.RouteHost, r.inv.TargetAudience)
+	}
 	if e.Identity != nil {
 		hay = append(hay, e.Identity.Subject, e.Identity.ClientID)
 	}
@@ -317,18 +307,6 @@ func matchEvent(e pipeline.SessionEvent, q string) bool {
 	if e.Inference != nil {
 		hay = append(hay, e.Inference.Completion, e.Inference.FinishReason)
 	}
-	// Surface auth-decision context in the substring search too so
-	// `/jwt_failed` or `/expected-issuer=...` matches naturally.
-	if e.Auth != nil {
-		for _, ib := range e.Auth.Inbound {
-			hay = append(hay, ib.Plugin, ib.Decision, ib.Reason, ib.Path,
-				ib.ExpectedIssuer, ib.ExpectedAudience, ib.TokenSubject)
-		}
-		for _, ob := range e.Auth.Outbound {
-			hay = append(hay, ob.Plugin, ob.Action, ob.Reason,
-				ob.RouteHost, ob.TargetAudience)
-		}
-	}
 	for _, s := range hay {
 		if strings.Contains(strings.ToLower(s), q) {
 			return true
@@ -337,40 +315,44 @@ func matchEvent(e pipeline.SessionEvent, q string) bool {
 	return false
 }
 
-// pairRequestsAndResponses returns a map whose keys are the indexes of
-// events that participate in a request↔response pair. It walks events in
-// order: each SessionRequest is paired with the NEXT SessionResponse that
-// matches on direction + protocol + method, within the same session.
+// pairInvocationRows pairs request-phase rows with their response-phase
+// counterparts by (direction, plugin). Each plugin's contribution on the
+// request side connects to its own contribution on the response side,
+// independent of other plugins in the same pipeline — so a jwt-validation
+// request row pairs with a jwt-validation response row even when several
+// other plugins fired on the same event.
 //
-// Sequential pairing is sufficient for AuthBridge's current traffic
-// patterns (no overlapping same-method outbound calls per turn). Future
-// work: key pairs by MCP.RPCID / A2A.RPCID when available for stricter
-// correlation.
-func pairRequestsAndResponses(events []pipeline.SessionEvent) map[int]int {
+// Sequential pairing is good enough for current traffic: each request
+// row is paired with the NEXT response row that shares (direction, plugin)
+// and hasn't been claimed.
+func pairInvocationRows(rows []invocationRow) map[int]int {
 	pairs := make(map[int]int)
-	for i := range events {
-		req := events[i]
-		if req.Phase != pipeline.SessionRequest {
+	key := func(r invocationRow) (string, pipeline.Direction, bool) {
+		if r.inv == nil {
+			return "", r.direction, false
+		}
+		return r.inv.Plugin, r.direction, true
+	}
+	for i := range rows {
+		if rows[i].event.Phase != pipeline.SessionRequest {
 			continue
 		}
 		if _, already := pairs[i]; already {
 			continue
 		}
-		for j := i + 1; j < len(events); j++ {
-			resp := events[j]
-			if resp.Phase != pipeline.SessionResponse {
+		plug, dir, ok := key(rows[i])
+		if !ok {
+			continue
+		}
+		for j := i + 1; j < len(rows); j++ {
+			if rows[j].event.Phase != pipeline.SessionResponse {
 				continue
 			}
 			if _, taken := pairs[j]; taken {
 				continue
 			}
-			if resp.Direction != req.Direction {
-				continue
-			}
-			if responsiblePlugin(resp) != responsiblePlugin(req) {
-				continue
-			}
-			if eventMethod(resp) != eventMethod(req) {
+			rplug, rdir, rok := key(rows[j])
+			if !rok || rplug != plug || rdir != dir {
 				continue
 			}
 			pairs[i] = j
