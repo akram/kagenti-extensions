@@ -223,7 +223,8 @@ type InboundAuth struct {
 // OutboundAuth is one auth-class plugin's outbound action on the request.
 // Action enumerates what the plugin did: "exchange" (RFC 8693 swap),
 // "broker" (external broker fetch, for future token-broker), "passthrough"
-// (no route match, no op — rarely populated; stats counters suffice),
+// (no route match, no op — populated so operators can see every outbound
+// host the pod talks to; symmetric with jwt-validation's bypass events),
 // "no_token_applied" (NoTokenPolicy kicked in), or "denied" (exchange or
 // broker failed).
 //

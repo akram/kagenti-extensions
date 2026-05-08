@@ -463,11 +463,13 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	host := pctx.Host
 
 	result := p.inner.HandleOutbound(ctx, authHeader, host)
-	// Record an Auth.Outbound entry only when we actually ACTED — exchange
-	// replaced a token or the IdP rejected a request. Passthrough hosts
-	// (ActionAllow with no route match) are skipped so the session stream
-	// isn't drowned by every outbound HTTP call that had no policy
-	// attached; operators still see those in /stats counters.
+	// Record an Auth.Outbound entry on every branch so operators have
+	// full outbound audit in the session stream — matches the inbound
+	// side's recording of allow/deny/bypass and mirrors the claim in the
+	// PLUGIN column that every event is attributable to a plugin.
+	// Passthrough is the "no route matched, default policy allowed"
+	// branch and is the noisiest; operators who find it too loud can
+	// either tighten routes or filter on action=passthrough in abctl.
 	switch result.Action {
 	case auth.ActionDeny:
 		appendOutboundAuth(pctx, pipeline.OutboundAuth{
@@ -498,6 +500,18 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			TargetAudience:  result.TargetAudience,
 			RequestedScopes: splitScopes(result.RequestedScopes),
 			CacheHit:        result.CacheHit,
+		})
+	default:
+		// ActionAllow / unroutable host / default-policy=passthrough all
+		// land here. Leave Reason empty — DenyReasonCode is the zero
+		// enum value on the allow branch and would render as the wrong
+		// code. RouteMatched distinguishes "had a passthrough route" (t)
+		// from "fell through to default_policy" (f).
+		appendOutboundAuth(pctx, pipeline.OutboundAuth{
+			Plugin:       "token-exchange",
+			Action:       "passthrough",
+			RouteMatched: result.RouteMatched,
+			RouteHost:    host,
 		})
 	}
 	return pipeline.Action{Type: pipeline.Continue}

@@ -635,13 +635,23 @@ func TestTokenExchange_Passthrough(t *testing.T) {
 	if pctx.Headers.Get("Authorization") != "Bearer user-token" {
 		t.Error("headers should not be modified for passthrough")
 	}
-	// Passthrough MUST NOT populate Auth.Outbound — otherwise every
-	// outbound HTTP call without policy would appear in the session
-	// stream, drowning the interesting exchange events. Operators still
-	// see passthrough counts via /stats' OUTBOUND_NO_MATCHING_ROUTE
-	// counter.
-	if pctx.Extensions.Auth != nil {
-		t.Errorf("expected Auth unset on passthrough, got %+v", pctx.Extensions.Auth)
+	// Passthrough populates Auth.Outbound with Action="passthrough" —
+	// symmetric with jwt-validation's bypass recording so operators can
+	// see every outbound host the pod talks to in the session stream.
+	// RouteHost carries the target so they can spot unexpected egress
+	// without hunting through slog lines.
+	if pctx.Extensions.Auth == nil || len(pctx.Extensions.Auth.Outbound) != 1 {
+		t.Fatalf("expected one Auth.Outbound entry, got %+v", pctx.Extensions.Auth)
+	}
+	ob := pctx.Extensions.Auth.Outbound[0]
+	if ob.Plugin != "token-exchange" || ob.Action != "passthrough" {
+		t.Errorf("entry = (%q, %q), want (token-exchange, passthrough)", ob.Plugin, ob.Action)
+	}
+	if ob.RouteHost != "some-host" {
+		t.Errorf("RouteHost = %q, want some-host", ob.RouteHost)
+	}
+	if ob.RouteMatched {
+		t.Error("RouteMatched should be false on default-policy passthrough")
 	}
 }
 
