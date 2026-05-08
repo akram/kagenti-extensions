@@ -391,6 +391,123 @@ Graduate to a typed slot when ≥2 of these are true:
 Don't graduate speculatively — the map path has no cost if you stay
 in it.
 
+## Registering a plugin
+
+A plugin advertises itself to the pipeline builder through `RegisterPlugin`
+in its package `init()`. The registration is open — any package that
+imports `authlib/plugins` can register a plugin, regardless of whether it
+lives in this module. The pattern mirrors `database/sql` drivers and
+`log/slog` handlers.
+
+### In-tree plugin (lives in `authbridge/authlib/plugins/`)
+
+Every built-in plugin has an `init()` at the top of its file:
+
+```go
+// authbridge/authlib/plugins/jwtvalidation.go
+
+package plugins
+
+func NewJWTValidation() *JWTValidation { return &JWTValidation{} }
+
+func init() {
+    RegisterPlugin("jwt-validation", func() pipeline.Plugin { return NewJWTValidation() })
+}
+```
+
+Because the file is in the `plugins` package, `init()` runs automatically
+when anything imports the package (e.g., `authbridge/cmd/authbridge/main.go`
+via `authlib/plugins.Build`).
+
+### Out-of-tree plugin (separate Go module)
+
+A plugin maintained outside kagenti-extensions lives in its own package
+and registers the same way:
+
+```go
+// github.com/acme/kagenti-rate-limiter/ratelimit.go
+
+package ratelimit
+
+import (
+    "github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+    "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+)
+
+type RateLimiter struct { ... }
+
+func (p *RateLimiter) Name() string { return "rate-limiter" }
+func (p *RateLimiter) Capabilities() pipeline.PluginCapabilities { ... }
+func (p *RateLimiter) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action { ... }
+func (p *RateLimiter) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action { ... }
+
+func init() {
+    plugins.RegisterPlugin("rate-limiter", func() pipeline.Plugin {
+        return &RateLimiter{}
+    })
+}
+```
+
+The authbridge binary picks the plugin up via a single side-effect import:
+
+```go
+// authbridge/cmd/authbridge/plugins_extra.go  (or wherever you customize)
+
+package main
+
+import _ "github.com/acme/kagenti-rate-limiter/ratelimit"
+```
+
+With that import, operator YAML can list `rate-limiter` in the pipeline:
+
+```yaml
+pipeline:
+  inbound:
+    plugins:
+      - name: jwt-validation
+      - name: rate-limiter
+        config: { requests_per_minute: 100 }
+```
+
+No fork of kagenti-extensions needed. Plugin is a regular Go module.
+
+### Rules and guardrails
+
+- **Double-registration panics.** If two packages both register under the
+  same name, the second call panics at process start. This is the
+  correct behaviour: silent last-write-wins would let a version
+  conflict poison the pipeline composition in ways that only surface as
+  mysterious runtime behaviour.
+- **Empty name panics.** An empty plugin name cannot be referenced from
+  YAML; registering under one is a programmer bug, not a recoverable
+  condition.
+- **Nil factory panics.** A nil factory would defer the crash until
+  `Build` tried to call it; panic at registration is closer to the bug.
+- **Unknown plugin fails Build.** `Build` rejects entries whose name
+  isn't in the registry; the error message includes every registered
+  name so typos are easy to spot.
+
+### Testing against the registry
+
+Tests that need a fake plugin use `RegisterPlugin` + `t.Cleanup` with
+`UnregisterPlugin`:
+
+```go
+func TestMyScenario(t *testing.T) {
+    plugins.RegisterPlugin("fake-auth", func() pipeline.Plugin {
+        return &fakeAuth{}
+    })
+    t.Cleanup(func() { plugins.UnregisterPlugin("fake-auth") })
+
+    p, err := plugins.Build([]config.PluginEntry{{Name: "fake-auth"}})
+    // ... assert on p ...
+}
+```
+
+`UnregisterPlugin` is test-only by convention — production code should
+never call it. It exists to keep tests isolated from each other under
+`-parallel`.
+
 ## Cross-references
 
 - `authbridge/authlib/pipeline/configurable.go` — the interface.
