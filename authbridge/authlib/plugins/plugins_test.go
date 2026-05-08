@@ -143,11 +143,98 @@ func TestJWTValidation_Configure_DefaultsJWKSFromIssuer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
-	// The derived JWKS URL is applied during Configure — we can't
-	// inspect it directly because it's buried inside the verifier, but
-	// if the inner auth handler is nil we know Configure bailed.
+	// Issuer-derived fallback; verify the exact URL so a future refactor
+	// of the priority chain can't silently fall through to a 404 path.
+	if got, want := p.cfg.JWKSURL, "http://keycloak/realms/kagenti/protocol/openid-connect/certs"; got != want {
+		t.Errorf("JWKSURL = %q, want %q", got, want)
+	}
 	if p.inner == nil {
 		t.Fatal("Configure produced no inner auth handler")
+	}
+}
+
+// Split-horizon case: operator supplies a public `issuer` (for iss-claim
+// matching) and internal `keycloak_url` + `keycloak_realm` (for reachable
+// JWKS fetching). The derivation prefers the internal URL — deriving from
+// issuer here would send the request into the public hostname which, in
+// Kagenti's Kind/OpenShift setups, resolves to 127.0.0.1 and fails
+// "connection refused" (see authbridge CLAUDE.md gotcha #2).
+func TestJWTValidation_Configure_DerivesJWKSFromInternalKeycloakURL(t *testing.T) {
+	p := NewJWTValidation()
+	raw := []byte(`{
+		"issuer": "http://keycloak.localtest.me:8080/realms/kagenti",
+		"keycloak_url": "http://keycloak-service.keycloak.svc:8080",
+		"keycloak_realm": "kagenti",
+		"audience": "a"
+	}`)
+	if err := p.Configure(raw); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	want := "http://keycloak-service.keycloak.svc:8080/realms/kagenti/protocol/openid-connect/certs"
+	if got := p.cfg.JWKSURL; got != want {
+		t.Errorf("JWKSURL = %q, want %q (internal URL from keycloak_url+realm, not issuer)", got, want)
+	}
+}
+
+// Explicit jwks_url beats every derivation source. Operators who know
+// exactly which endpoint to hit (e.g. a custom JWKS proxy) must not have
+// it silently overwritten by the keycloak_url/realm derivation.
+func TestJWTValidation_Configure_ExplicitJWKSURLWins(t *testing.T) {
+	p := NewJWTValidation()
+	raw := []byte(`{
+		"issuer": "http://keycloak.public:8080/realms/kagenti",
+		"jwks_url": "http://custom-jwks-proxy.example/keys",
+		"keycloak_url": "http://keycloak-internal:8080",
+		"keycloak_realm": "kagenti",
+		"audience": "a"
+	}`)
+	if err := p.Configure(raw); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if got, want := p.cfg.JWKSURL, "http://custom-jwks-proxy.example/keys"; got != want {
+		t.Errorf("JWKSURL = %q, want %q (explicit jwks_url must win over derivations)", got, want)
+	}
+}
+
+// Only one of keycloak_url/keycloak_realm is supplied — derivation can't
+// complete (Keycloak path needs both). Fall through to issuer-derivation
+// rather than crashing or leaving JWKSURL empty.
+//
+// Covered both directions to catch a future refactor that ANDs the check
+// differently (e.g. a short-circuit that treats empty realm as default
+// would silently build a bogus URL).
+func TestJWTValidation_Configure_PartialKeycloakConfigFallsThroughToIssuer(t *testing.T) {
+	cases := []struct {
+		name, raw string
+	}{
+		{
+			name: "keycloak_url without realm",
+			raw: `{
+				"issuer": "http://keycloak/realms/kagenti",
+				"keycloak_url": "http://internal:8080",
+				"audience": "a"
+			}`,
+		},
+		{
+			name: "keycloak_realm without url",
+			raw: `{
+				"issuer": "http://keycloak/realms/kagenti",
+				"keycloak_realm": "kagenti",
+				"audience": "a"
+			}`,
+		},
+	}
+	want := "http://keycloak/realms/kagenti/protocol/openid-connect/certs"
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewJWTValidation()
+			if err := p.Configure([]byte(tc.raw)); err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+			if got := p.cfg.JWKSURL; got != want {
+				t.Errorf("JWKSURL = %q, want %q (partial keycloak_* must not short-circuit issuer-derivation)", got, want)
+			}
+		})
 	}
 }
 
