@@ -107,9 +107,118 @@ func TestSessionEvent_MarshalJSON_OmitsEmpty(t *testing.T) {
 	}
 	s := string(data)
 
-	for _, field := range []string{"a2a", "mcp", "inference", "identity", "statusCode", "error", "host", "targetAudience", "durationMs"} {
+	for _, field := range []string{"a2a", "mcp", "inference", "auth", "plugins", "identity", "statusCode", "error", "host", "targetAudience", "durationMs"} {
 		if strings.Contains(s, `"`+field+`":`) {
 			t.Errorf("expected %q omitted when zero: %s", field, s)
 		}
+	}
+}
+
+// SessionDenied must serialize as "denied" on the wire so consumers
+// filtering on phase (abctl `/deny`, stats queries) see a stable string
+// rather than the numeric enum.
+func TestSessionPhase_Denied_SerializesAsString(t *testing.T) {
+	if got := SessionDenied.String(); got != "denied" {
+		t.Errorf("SessionDenied.String() = %q, want %q", got, "denied")
+	}
+	data, err := json.Marshal(SessionDenied)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(data) != `"denied"` {
+		t.Errorf("SessionDenied Marshal = %s, want %q", data, `"denied"`)
+	}
+	var p SessionPhase
+	if err := json.Unmarshal([]byte(`"denied"`), &p); err != nil {
+		t.Fatalf("Unmarshal denied: %v", err)
+	}
+	if p != SessionDenied {
+		t.Errorf("Unmarshal(\"denied\") = %v, want SessionDenied", p)
+	}
+}
+
+// Round-trip the Auth extension through JSON including both directions,
+// multiple entries per direction, and the optional diagnostic fields.
+// Locks in the wire shape so a future field addition that's missed in
+// sessionEventWire fails this test (see top-level TestSessionEvent_
+// JSONRoundTrip for the same-guarantee pattern applied to the rest of
+// SessionEvent).
+func TestSessionEvent_AuthExtension_JSONRoundTrip(t *testing.T) {
+	orig := SessionEvent{
+		At:        time.Unix(1700000000, 0).UTC(),
+		Direction: Inbound,
+		Phase:     SessionDenied,
+		Auth: &AuthExtension{
+			Inbound: []InboundAuth{{
+				Plugin:           "jwt-validation",
+				Decision:         "deny",
+				Reason:           "jwt_failed",
+				ExpectedIssuer:   "http://keycloak.localtest.me:8080/realms/kagenti",
+				ExpectedAudience: "spiffe://localtest.me/ns/team1/sa/weather-tool",
+			}},
+			Outbound: []OutboundAuth{{
+				Plugin:          "token-exchange",
+				Action:          "exchange",
+				RouteMatched:    true,
+				RouteHost:       "weather-tool-mcp",
+				TargetAudience:  "spiffe://localtest.me/ns/team1/sa/weather-tool",
+				RequestedScopes: []string{"openid", "weather-aud"},
+				CacheHit:        true,
+			}},
+		},
+	}
+	first, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("first Marshal: %v", err)
+	}
+	if !strings.Contains(string(first), `"phase":"denied"`) {
+		t.Errorf("expected phase=denied in JSON: %s", first)
+	}
+	var decoded SessionEvent
+	if err := json.Unmarshal(first, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	second, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatalf("second Marshal: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("Auth extension round-trip drifted:\n  first:  %s\n  second: %s", first, second)
+	}
+}
+
+// Plugins map should round-trip as keyed RawMessage. The listener is
+// expected to have already marshaled each value (Extensions.Plugins uses
+// any; SessionEvent.Plugins uses json.RawMessage — it's the wire form).
+// This test verifies the consumer side: decode lands RawMessage back in
+// place so abctl (or any JSON consumer) can re-decode per plugin.
+func TestSessionEvent_PluginsMap_JSONRoundTrip(t *testing.T) {
+	orig := SessionEvent{
+		At:        time.Unix(1700000000, 0).UTC(),
+		Direction: Outbound,
+		Phase:     SessionRequest,
+		Plugins: map[string]json.RawMessage{
+			"rate-limiter": json.RawMessage(`{"allowed":true,"tokensLeft":42}`),
+			"custom-audit": json.RawMessage(`{"traceId":"abc-123"}`),
+		},
+	}
+	first, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("first Marshal: %v", err)
+	}
+	if !strings.Contains(string(first), `"plugins":`) {
+		t.Errorf("expected plugins in JSON: %s", first)
+	}
+	var decoded SessionEvent
+	if err := json.Unmarshal(first, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(decoded.Plugins) != 2 {
+		t.Fatalf("decoded.Plugins size = %d, want 2", len(decoded.Plugins))
+	}
+	// RawMessage should round-trip byte-identical so downstream consumers
+	// can decode each plugin's payload into its own type.
+	if got := string(decoded.Plugins["rate-limiter"]); got != `{"allowed":true,"tokensLeft":42}` {
+		t.Errorf("rate-limiter payload drifted: %q", got)
 	}
 }

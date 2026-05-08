@@ -5,23 +5,51 @@ import "time"
 // Extensions holds typed extension slots for plugin-to-plugin communication.
 // Each slot is populated by a specific plugin and consumed by downstream plugins.
 //
-// The named slots (MCP, A2A, Security, Delegation, Inference) are reserved
-// for telemetry-worthy extensions — data that flows into SessionEvent, is
-// serialized on the wire API, and has a published schema that unrelated
-// plugins can rely on. Adding a new named slot is a core-library change.
+// The named slots (MCP, A2A, Security, Delegation, Inference, Auth) are
+// reserved for telemetry-worthy extensions — data that flows into
+// SessionEvent, is serialized on the wire API, and has a published schema
+// that unrelated plugins can rely on. Adding a new named slot is a
+// core-library change.
 //
-// For plugin-private, per-request state that doesn't need a published
-// schema, use the generic GetState / SetState helpers defined below; they
-// store values in Custom keyed by plugin name, letting a new plugin land
-// without any authlib modification.
+// For data that shouldn't drive a core-library change, use Custom. Two
+// access patterns share the same map:
+//
+//   - Plugin-PRIVATE state (cross-phase continuity inside one plugin).
+//     Use the typed SetState / GetState generics. Key is plugin.Name().
+//     Value is typically *T for a plugin-internal struct (may contain
+//     sync primitives, unexported fields, channels). Never flows to
+//     session events.
+//
+//   - Plugin-PUBLIC observability. Use a key suffixed with "/event"
+//     (e.g., "rate-limiter/event"). Value must be JSON-marshalable.
+//     The listener serializes matching entries into SessionEvent.Plugins
+//     at record time — keyed by the plugin name (suffix stripped). A
+//     new plugin can surface events to /v1/sessions without any
+//     authlib modification. See authlib/plugins/CONVENTIONS.md for the
+//     convention + promotion criteria for named-slot graduation.
+//
+// The suffix convention keeps the two intents unambiguous at write
+// time: a plugin author has to deliberately type "/event" to opt into
+// serialization, so private state can never leak by accident.
 type Extensions struct {
 	MCP        *MCPExtension
 	A2A        *A2AExtension
 	Security   *SecurityExtension
 	Delegation *DelegationExtension
 	Inference  *InferenceExtension
+	Auth       *AuthExtension
 	Custom     map[string]any
 }
+
+// PluginEventSuffix is the key suffix that marks a Custom entry as
+// plugin-public observability data destined for SessionEvent.Plugins.
+// Plugin authors opt into serialization by writing:
+//
+//	pctx.Extensions.Custom["rate-limiter"+pipeline.PluginEventSuffix] = ...
+//
+// The listener strips the suffix when populating SessionEvent.Plugins,
+// so consumers see the plugin name as the map key.
+const PluginEventSuffix = "/event"
 
 // SetState stashes a typed value on pctx under key. Intended for plugin-
 // private per-request state — e.g., a rate-limiter remembering how many
@@ -148,6 +176,65 @@ type SecurityExtension struct {
 	Labels      []string `json:"labels,omitempty"`
 	Blocked     bool     `json:"blocked,omitempty"`
 	BlockReason string   `json:"blockReason,omitempty"`
+}
+
+// AuthExtension carries per-request auth decisions made by auth-class
+// plugins (jwt-validation inbound, token-exchange outbound, and any future
+// plugins of the same category). Multiple plugins can contribute — each
+// appends an entry — so chained auth plugins cooperate without schema
+// churn. Directions are disjoint per request: a single listener pass
+// populates at most one of Inbound / Outbound.
+type AuthExtension struct {
+	Inbound  []InboundAuth  `json:"inbound,omitempty"`
+	Outbound []OutboundAuth `json:"outbound,omitempty"`
+}
+
+// InboundAuth is one auth-class plugin's inbound decision on the request.
+// Fields are populated selectively: Reason/ExpectedIssuer/ExpectedAudience
+// are diagnostic data for deny branches; TokenSubject/Audience/Scopes are
+// populated on allow so operators see what the plugin actually verified.
+//
+// Plugin is the plugin's Name() for traceability when multiple entries
+// stack. Decision is the stable machine code: "allow" | "deny" | "bypass".
+// Reason is a stable machine-readable label, paired with the counters
+// plugins already feed into /stats (e.g. "jwt_failed", "path_bypass");
+// use this for filtering/indexing rather than human strings.
+//
+// NEVER contains the raw bearer token, token signature, or client
+// credentials. The session API has no auth on it; only safe-to-log data
+// belongs here.
+type InboundAuth struct {
+	Plugin           string   `json:"plugin"`
+	Decision         string   `json:"decision"`
+	Reason           string   `json:"reason,omitempty"`
+	ExpectedIssuer   string   `json:"expectedIssuer,omitempty"`
+	ExpectedAudience string   `json:"expectedAudience,omitempty"`
+	TokenSubject     string   `json:"tokenSubject,omitempty"`
+	TokenAudience    []string `json:"tokenAudience,omitempty"`
+	TokenScopes      []string `json:"tokenScopes,omitempty"`
+}
+
+// OutboundAuth is one auth-class plugin's outbound action on the request.
+// Action enumerates what the plugin did: "exchange" (RFC 8693 swap),
+// "broker" (external broker fetch, for future token-broker), "passthrough"
+// (no route match, no op — rarely populated; stats counters suffice),
+// "no_token_applied" (NoTokenPolicy kicked in), or "denied" (exchange or
+// broker failed).
+//
+// Route context (RouteMatched / RouteHost / TargetAudience /
+// RequestedScopes) is populated when the plugin resolved a route; absent
+// for plugins that don't use routing. CacheHit is populated by plugins
+// that cache issued tokens (token-exchange) so perf diagnostics surface
+// without reading /stats.
+type OutboundAuth struct {
+	Plugin          string   `json:"plugin"`
+	Action          string   `json:"action"`
+	Reason          string   `json:"reason,omitempty"`
+	RouteMatched    bool     `json:"routeMatched,omitempty"`
+	RouteHost       string   `json:"routeHost,omitempty"`
+	TargetAudience  string   `json:"targetAudience,omitempty"`
+	RequestedScopes []string `json:"requestedScopes,omitempty"`
+	CacheHit        bool     `json:"cacheHit,omitempty"`
 }
 
 // DelegationExtension tracks the token delegation chain across hops.
