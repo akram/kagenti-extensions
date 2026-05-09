@@ -362,10 +362,13 @@ func startHTTPServer(name string, handler http.Handler, addr string) *http.Serve
 	return srv
 }
 
-func startStatServer(config *config.Config, provider observe.StatsProvider) *observe.StatServer {
-	srv := observe.NewStatServer(config.Stats.StatsAddress, config, provider)
+func startStatServer(cfg *config.Config, provider observe.StatsProvider) *observe.StatServer {
+	// ConfigProvider is a trivial closure over cfg here. Commit 5
+	// will swap it for the reloader's ConfigProvider so /config
+	// reflects a hot-swapped pipeline.
+	srv := observe.NewStatServer(cfg.Stats.StatsAddress, func() *config.Config { return cfg }, provider)
 	go func() {
-		slog.Info("stat server listening", "addr", config.Stats.StatsAddress)
+		slog.Info("stat server listening", "addr", cfg.Stats.StatsAddress)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("stat server: %v", err)
 		}
