@@ -1,4 +1,4 @@
-package plugins
+package jwtvalidation
 
 import (
 	"bytes"
@@ -14,8 +14,9 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/validation"
 )
 
 // jwtValidationConfig is the plugin's local config schema. See
@@ -161,7 +162,7 @@ type JWTValidation struct {
 func NewJWTValidation() *JWTValidation { return &JWTValidation{} }
 
 func init() {
-	RegisterPlugin("jwt-validation", func() pipeline.Plugin { return NewJWTValidation() })
+	plugins.RegisterPlugin("jwt-validation", func() pipeline.Plugin { return NewJWTValidation() })
 }
 
 func (p *JWTValidation) Name() string { return "jwt-validation" }
@@ -306,10 +307,12 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		// ExpectedIssuer / ExpectedAudience diagnostic fields that the
 		// one-liner DenyAndRecord doesn't accept.
 		pctx.Record(pipeline.Invocation{
-			Action:           pipeline.ActionDeny,
-			Reason:           result.DenyReasonCode.String(),
-			ExpectedIssuer:   p.cfg.Issuer,
-			ExpectedAudience: audience,
+			Action: pipeline.ActionDeny,
+			Reason: result.DenyReasonCode.String(),
+			Details: map[string]string{
+				"expected_issuer":   p.cfg.Issuer,
+				"expected_audience": audience,
+			},
 		})
 		// result.DenyReason carries the specific failure (missing header,
 		// audience mismatch, expired, etc.). Pick a code whose default
@@ -333,15 +336,18 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	}
 
 	// ActionAllow with Claims = authorized. Surface what the plugin
-	// VERIFIED in the token — diverges from the top-level Identity
-	// snapshot if later plugins re-annotate pctx.Claims.
-	pctx.Claims = result.Claims
+	// VERIFIED in the token via the pipeline.Identity interface.
+	// Plugins that don't run jwt-validation (SAML, mTLS, custom)
+	// publish their own adapter; listeners read through the interface.
+	pctx.Identity = claimsIdentity{c: result.Claims}
 	pctx.Record(pipeline.Invocation{
-		Action:        pipeline.ActionAllow,
-		Reason:        auth.APPROVE_AUTHORIZED.String(),
-		TokenSubject:  result.Claims.Subject,
-		TokenAudience: result.Claims.Audience,
-		TokenScopes:   result.Claims.Scopes,
+		Action: pipeline.ActionAllow,
+		Reason: auth.APPROVE_AUTHORIZED.String(),
+		Details: map[string]string{
+			"token_subject":  result.Claims.Subject,
+			"token_audience": strings.Join(result.Claims.Audience, ","),
+			"token_scopes":   strings.Join(result.Claims.Scopes, " "),
+		},
 	})
 	return pipeline.Action{Type: pipeline.Continue}
 }
@@ -382,5 +388,5 @@ var (
 	_ pipeline.Initializer  = (*JWTValidation)(nil)
 	_ pipeline.Shutdowner   = (*JWTValidation)(nil)
 	_ pipeline.Readier      = (*JWTValidation)(nil)
-	_ StatsSource           = (*JWTValidation)(nil)
+	_ plugins.StatsSource   = (*JWTValidation)(nil)
 )
