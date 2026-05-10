@@ -318,3 +318,43 @@ func TestJWTValidation_OnRequest_PopulatesAuth_Allow(t *testing.T) {
 		t.Errorf("token_audience = %q, want agent-aud", got.Details["token_audience"])
 	}
 }
+
+// TestJWTValidation_OnRequest_MultiAudience_CommaJoined pins the encoding
+// of multi-value audiences to comma-join. JWT RFC 7519 allows spaces in
+// aud values, so a space-joined form would be ambiguous for consumers
+// splitting on the delimiter. Deliberately locked down here so a future
+// change to strings.Join(..., " ") is caught before shipping.
+func TestJWTValidation_OnRequest_MultiAudience_CommaJoined(t *testing.T) {
+	claims := &validation.Claims{
+		Subject:  "alice",
+		Issuer:   "http://issuer.example",
+		Audience: []string{"aud-a", "aud-b"},
+		ClientID: "caller",
+		Scopes:   []string{"openid", "write"},
+	}
+	inner := auth.New(auth.Config{
+		Verifier: &mockJWTVerifier{claims: claims},
+		Identity: auth.IdentityConfig{Audience: "aud-a"},
+	})
+	p := newTestJWTValidation(t, "http://issuer.example", inner)
+
+	pctx := &pipeline.Context{Headers: http.Header{}, Path: "/api/call"}
+	pctx.Headers.Set("Authorization", "Bearer tok")
+	action := invokeOnRequest(p, pctx)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue, got %v (violation=%+v)", action.Type, action.Violation)
+	}
+	if pctx.Extensions.Invocations == nil || len(pctx.Extensions.Invocations.Inbound) != 1 {
+		t.Fatalf("expected one entry, got %+v", pctx.Extensions.Invocations)
+	}
+	got := pctx.Extensions.Invocations.Inbound[0]
+	if got.Details["token_audience"] != "aud-a,aud-b" {
+		t.Errorf("token_audience = %q, want %q (comma-joined per RFC 7519 spaces-allowed-in-aud)",
+			got.Details["token_audience"], "aud-a,aud-b")
+	}
+	// Also sanity-check scopes still use space — the two conventions
+	// must coexist in the same record.
+	if got.Details["token_scopes"] != "openid write" {
+		t.Errorf("token_scopes = %q, want %q", got.Details["token_scopes"], "openid write")
+	}
+}

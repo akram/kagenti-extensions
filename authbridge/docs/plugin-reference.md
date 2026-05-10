@@ -355,8 +355,25 @@ value):
   Action + Reason.
 - Third-party plugins: pick snake_case keys scoped to your semantic
   domain (`tokens_remaining`, `quota_bucket`, `redaction_count`, etc.).
-  Stringify booleans as `"true"`/`"false"`; stringify `[]string` as
-  space-joined (OAuth scope convention).
+
+**Value encoding:** `Details` values are strings; plugins must
+stringify non-string data themselves. Conventions across built-ins:
+
+| Go type | Encoding | Rationale |
+|---|---|---|
+| `string` | as-is | no transform |
+| `bool` | `"true"` / `"false"` | stable, parse-friendly |
+| `int` / `float` | `strconv.Itoa` / `strconv.FormatFloat` | decimal, no unit suffix |
+| `[]string` — OAuth scopes | space-joined (`"openid email"`) | RFC 6749 forbids spaces in scope tokens, so space-delimited is unambiguous |
+| `[]string` — JWT audiences | comma-joined (`"aud-a,aud-b"`) | RFC 7519 permits spaces in `aud`, so space-joining would be ambiguous |
+| `[]string` — other | comma-joined by default; pick a delimiter that can't appear in your values | operator split-on-delimiter needs one predictable choice |
+| `time.Time` | RFC 3339 | consistent with logs |
+| `time.Duration` | `strconv.FormatInt(d.Milliseconds(), 10)` + `_ms` suffix on the key | milliseconds integer is abctl-friendly |
+
+If your field's elements might contain the delimiter, pick a different
+delimiter and document it on the field rather than escape — consumers
+doing `strings.Split` are simpler to write against an unambiguous
+separator than against an escape convention.
 
 **NEVER put raw tokens, signatures, or client credentials in
 `Details`.** The session store has no auth on it; only safe-to-log data
