@@ -56,14 +56,21 @@ func (e *A2AExtension) Fragments() []contracts.Fragment {
 	return out
 }
 
-// normalizeA2ARole rewrites A2A's native role vocabulary to match the
-// Inference / OpenAI-style vocabulary. Keeping guardrails to a single
-// role set across protocols is worth the small loss of A2A fidelity.
-// A2A-aware consumers may type-assert to *A2AExtension to read the
-// raw Role field directly; framework-generic guardrails consuming via
-// the ContentSource interface treat the normalized value as
-// authoritative (the interface deliberately does not surface the raw
-// value).
+// normalizeA2ARole rewrites A2A's native role vocabulary (user/agent)
+// to the standard cross-protocol vocabulary used by Inference and by
+// the Role constants in authlib/contracts (user/assistant). Uniform
+// role names across every protocol that implements ContentSource is
+// the design goal: a jailbreak detector, PII scrubber, or content
+// classifier compares `f.Role == contracts.RoleUser` once and works
+// on A2A, MCP, and Inference without per-protocol branching.
+//
+// Fragment.Role IS the role information consumers need — no
+// type-assertion required. The only situation where reading the raw
+// A2A-native string ("agent") would be appropriate is A2A-specialized
+// tooling (e.g., an A2A-protocol inspector that wants to display the
+// wire-level value verbatim); such callers hold a concrete
+// *A2AExtension and read .Role directly. Framework-generic consumers
+// should not do that.
 func normalizeA2ARole(r string) string {
 	switch r {
 	case "agent":
