@@ -231,6 +231,46 @@ type Invocations struct {
 	Outbound []Invocation `json:"outbound,omitempty"`
 }
 
+// FilteredByPhase returns a new *Invocations containing only entries
+// whose Phase matches the argument. Strict match — untagged entries
+// (Phase == "") are dropped because the framework always populates
+// Phase via Context.Record; an untagged entry is a plugin bug and
+// including it in the wrong phase would double-report in one event
+// and be missing from the other.
+//
+// The underlying Invocation values are copied shallowly; mutating a
+// returned entry's Details map mutates the source. Acceptable for
+// the per-request flow where the original lives only on pctx and is
+// discarded after recording.
+//
+// Returns nil when no entries match so callers can drop the field
+// from the SessionEvent without a null check.
+//
+// Intended for reject-event recording in listeners and for the
+// accept-path phase split (one SessionEvent per phase). Listeners
+// that need full independence from pctx's lifecycle layer their own
+// snapshot on top.
+func (in *Invocations) FilteredByPhase(phase InvocationPhase) *Invocations {
+	if in == nil {
+		return nil
+	}
+	out := &Invocations{}
+	for _, inv := range in.Inbound {
+		if inv.Phase == phase {
+			out.Inbound = append(out.Inbound, inv)
+		}
+	}
+	for _, inv := range in.Outbound {
+		if inv.Phase == phase {
+			out.Outbound = append(out.Outbound, inv)
+		}
+	}
+	if out.Inbound == nil && out.Outbound == nil {
+		return nil
+	}
+	return out
+}
+
 // Invocation records one plugin's action on one pipeline pass. Plugin is
 // the plugin's Name() for traceability. Action is the universal 5-value
 // verb (see Action). Reason is a stable machine-readable label paired

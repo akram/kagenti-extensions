@@ -826,14 +826,23 @@ func TestPipelineRun_ObserveSynthesizesRecordWhenPluginSkipsIt(t *testing.T) {
 		t.Fatalf("want exactly one synthesized invocation, got: %+v", pctx.Extensions.Invocations)
 	}
 	inv := pctx.Extensions.Invocations.Inbound[0]
-	if inv.Reason != "shadow_synthesized" {
-		t.Errorf("reason = %q, want shadow_synthesized", inv.Reason)
+	// Reason carries the plugin's machine-stable deny code so
+	// dashboards grouping by Reason see the actual deny across
+	// both recorded and synthesized paths.
+	if inv.Reason != "policy.forbidden" {
+		t.Errorf("reason = %q, want policy.forbidden (the plugin's deny code)", inv.Reason)
 	}
 	if !inv.Shadow {
 		t.Error("Shadow flag not set on synthesized record")
 	}
-	if inv.Details["would_deny_code"] != "policy.forbidden" {
-		t.Errorf("would_deny_code = %q, want policy.forbidden", inv.Details["would_deny_code"])
+	// Details["synthesized"] distinguishes "plugin didn't Record then
+	// returned Deny" from "plugin Recorded then returned Deny" for
+	// debugging, without hiding the deny code behind a synthetic Reason.
+	if inv.Details["synthesized"] != "true" {
+		t.Errorf("Details[synthesized] = %q, want true", inv.Details["synthesized"])
+	}
+	if inv.Details["would_deny_reason"] != "no" {
+		t.Errorf("would_deny_reason = %q, want %q", inv.Details["would_deny_reason"], "no")
 	}
 }
 

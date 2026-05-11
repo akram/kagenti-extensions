@@ -240,7 +240,7 @@ func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Ac
 		At:          time.Now(),
 		Direction:   pipeline.Outbound,
 		Phase:       pipeline.SessionDenied,
-		Invocations: filterInvocationsByPhase(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
+		Invocations: pctx.Extensions.Invocations.FilteredByPhase(pipeline.InvocationPhaseRequest),
 		Host:        pctx.Host,
 		StatusCode:  status,
 		Error: &pipeline.EventError{
@@ -250,32 +250,6 @@ func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Ac
 		},
 	}
 	s.Sessions.Append(sid, ev)
-}
-
-// filterInvocationsByPhase returns only the invocations that match the
-// given phase. Used by reject-event recording to avoid emitting response-
-// phase entries on a request-phase denial (the pipeline's Reject
-// terminates before RunResponse, so phase filtering is redundant in
-// practice, but stays consistent with the extproc listener's helper).
-func filterInvocationsByPhase(ext *pipeline.Invocations, phase pipeline.InvocationPhase) *pipeline.Invocations {
-	if ext == nil {
-		return nil
-	}
-	out := &pipeline.Invocations{}
-	for _, inv := range ext.Inbound {
-		if inv.Phase == "" || inv.Phase == phase {
-			out.Inbound = append(out.Inbound, inv)
-		}
-	}
-	for _, inv := range ext.Outbound {
-		if inv.Phase == "" || inv.Phase == phase {
-			out.Outbound = append(out.Outbound, inv)
-		}
-	}
-	if out.Inbound == nil && out.Outbound == nil {
-		return nil
-	}
-	return out
 }
 
 func extractBearer(authHeader string) string {

@@ -218,7 +218,7 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 		At:          time.Now(),
 		Direction:   pipeline.Inbound,
 		Phase:       pipeline.SessionDenied,
-		Invocations: filterInvocationsByPhase(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
+		Invocations: pctx.Extensions.Invocations.FilteredByPhase(pipeline.InvocationPhaseRequest),
 		Host:        pctx.Host,
 		StatusCode:  status,
 		Error: &pipeline.EventError{
@@ -228,30 +228,6 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 		},
 	}
 	s.Sessions.Append(sid, ev)
-}
-
-// filterInvocationsByPhase returns only the invocations matching the
-// phase. Mirrors the filter used by the extproc listener so reject
-// events carry the request-phase entries that attributed the block.
-func filterInvocationsByPhase(ext *pipeline.Invocations, phase pipeline.InvocationPhase) *pipeline.Invocations {
-	if ext == nil {
-		return nil
-	}
-	out := &pipeline.Invocations{}
-	for _, inv := range ext.Inbound {
-		if inv.Phase == "" || inv.Phase == phase {
-			out.Inbound = append(out.Inbound, inv)
-		}
-	}
-	for _, inv := range ext.Outbound {
-		if inv.Phase == "" || inv.Phase == phase {
-			out.Outbound = append(out.Outbound, inv)
-		}
-	}
-	if out.Inbound == nil && out.Outbound == nil {
-		return nil
-	}
-	return out
 }
 
 // writeRejection renders a pipeline Reject to the http.ResponseWriter,

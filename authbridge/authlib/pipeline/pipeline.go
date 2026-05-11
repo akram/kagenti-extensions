@@ -181,17 +181,27 @@ func markShadowAndLog(pctx *Context, pluginName string, phase InvocationPhase, a
 	status, _, _ := action.Violation.Render()
 	marked := pctx.markLastInvocationShadow(pluginName, phase)
 	if !marked {
+		// Use the Violation's machine-stable code as Reason so
+		// dashboards grouping denials by reason see the plugin's
+		// actual deny code for both recorded and synthesized paths.
+		// The "synthesized" signal lives in Details so operators can
+		// still distinguish "plugin Recorded then Deny'd" from
+		// "plugin Deny'd without Recording" when debugging.
+		reason := "plugin.unspecified"
+		if action.Violation != nil && action.Violation.Code != "" {
+			reason = action.Violation.Code
+		}
 		inv := Invocation{
 			Plugin: pluginName,
 			Phase:  phase,
 			Action: ActionDeny,
-			Reason: "shadow_synthesized",
+			Reason: reason,
 			Path:   pctx.Path,
 			Shadow: true,
 		}
 		if action.Violation != nil {
 			inv.Details = map[string]string{
-				"would_deny_code":   action.Violation.Code,
+				"synthesized":       "true",
 				"would_deny_reason": action.Violation.Reason,
 			}
 		}

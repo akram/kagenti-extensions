@@ -58,6 +58,15 @@ pipeline:
 
 ## `on_error` policy
 
+> **Naming caveat.** Despite the name, `on_error` controls how the
+> framework handles **intentional `Deny` actions** returned by the
+> plugin — it is not a panic/error handler. A panic or a
+> runtime-error return still surfaces as a 500 regardless of this
+> setting. Reach for `on_error` to stage the rollout of a new
+> guardrail (observe before enforce) or to toggle a plugin off
+> without a redeploy; reach for something else when you want to
+> bound misbehavior.
+
 `on_error` is a **framework-owned** wrapper around the plugin — plugin
 authors do not read it, implement it, or branch on it. Its job is to
 let operators roll out a new guardrail without risking production.
@@ -94,6 +103,35 @@ Operators count would-have-blocked events by filtering Invocations on
 - `count(Invocations where shadow=false and action="deny") by plugin` —
   enforced denials (unchanged by this feature)
 
+### Don't put matched content in `Violation.Reason`
+
+`Reason` (the free-text explanation on `pipeline.Deny` / `DenyAndRecord`
+and on `Invocation.Reason`) flows to two places: the session store at
+`/v1/sessions` and, under `observe`, a `WARN` log line. Both live
+outside the authorization domain of the request itself — logs typically
+aggregate to a different backend than session events, with different
+retention and access policies.
+
+Plugin authors: **keep `Reason` to a machine-stable short code and/or a
+generic description.** Do not echo matched content, raw user input, or
+credential-shaped substrings into `Reason`.
+
+```go
+// GOOD
+return pctx.DenyAndRecord("ssn_match", "pii.detected", "matched PII pattern")
+
+// BAD — echoes a matched SSN into logs and the session store:
+return pctx.DenyAndRecord("ssn_match", "pii.detected",
+    fmt.Sprintf("matched SSN %s at offset 42", ssn))
+```
+
+If you need to record which pattern matched for debugging, put a
+**hash or stable fingerprint** of the content in `Invocation.Details`
+(`Details["match_sha256"] = "a1b2c3..."`), never the raw match. The
+same rule applies to `Details` values — see the existing "NEVER put
+raw tokens, signatures, or client credentials" note on the Invocation
+type below.
+
 ### Off vs. removing the entry
 
 Both achieve "don't run this plugin." `off` exists so a single field
@@ -110,9 +148,8 @@ entirely if you don't anticipate re-enabling it.
   Percentage rollout is a future feature.
 - Not a timeout — a slow plugin still blocks the request. Per-plugin
   deadlines are a separate knob.
-- Does not cover runtime `error` returns / panics from `OnRequest`.
-  Policy applies only to intentional `Reject` actions; a panic in
-  `observe` still surfaces as a 500.
+- Not a panic / runtime-error handler (see the leading caveat at the
+  top of this section).
 
 ### Applicability to auth gates
 
