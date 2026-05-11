@@ -12,9 +12,14 @@ package pipeline
 // Shadow=true. ErrorPolicyOff is a kill-switch — the plugin is
 // not dispatched at all.
 //
-// Reserved built-in gates (jwt-validation, token-exchange) are locked
-// to ErrorPolicyEnforce: shadowing auth is an authentication bypass
-// dressed as a feature. plugins.BuildChain validates this at startup.
+// Shadowing or disabling auth gates (jwt-validation, token-exchange)
+// is an authentication bypass dressed as a feature — operators SHOULD
+// leave those plugins on ErrorPolicyEnforce (the default).
+//
+// The framework does NOT enforce this at startup: nothing prevents
+// on_error: observe on jwt-validation today. A built-in-registry
+// sealing pass is planned as a follow-up to reject a non-enforce
+// policy on reserved gates at build time.
 type ErrorPolicy string
 
 const (
