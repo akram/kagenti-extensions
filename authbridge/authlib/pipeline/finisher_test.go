@@ -397,6 +397,129 @@ func TestRunFinish_SetBodyDroppedDuringFinish(t *testing.T) {
 	}
 }
 
+// TestRunFinish_DoubleCallGuard verifies the second RunFinish on a
+// pctx is rejected with a WARN and early-returns, so a buggy listener
+// (two defers registered, refactor accident) doesn't double-release
+// Finisher state.
+func TestRunFinish_DoubleCallGuard(t *testing.T) {
+	var n atomic.Int32
+	f := newFinisher("f", func(_ context.Context, _ *Context) {
+		n.Add(1)
+	})
+	p, err := New([]Plugin{f})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pctx := &Context{}
+	p.Run(context.Background(), pctx)
+	p.RunFinish(context.Background(), pctx, Outcome{FinalAction: OutcomeAllow})
+	p.RunFinish(context.Background(), pctx, Outcome{FinalAction: OutcomeAllow})
+	if got := n.Load(); got != 1 {
+		t.Errorf("OnFinish fired %d times, want 1 (second RunFinish must no-op)", got)
+	}
+}
+
+// TestRunFinish_CtxValuePropagation verifies OnFinish sees values
+// from the caller's ctx (WithoutCancel preserves values), even though
+// cancellation is detached. Uses a per-test context key.
+func TestRunFinish_CtxValuePropagation(t *testing.T) {
+	type key struct{}
+	var seen any
+	f := newFinisher("f", func(ctx context.Context, _ *Context) {
+		seen = ctx.Value(key{})
+	})
+	p, err := New([]Plugin{f})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pctx := &Context{}
+	parent := context.WithValue(context.Background(), key{}, "req-abc-123")
+	// Cancel parent to prove cancellation is detached.
+	cancelCtx, cancel := context.WithCancel(parent)
+	cancel()
+	p.Run(context.Background(), pctx)
+	p.RunFinish(cancelCtx, pctx, Outcome{FinalAction: OutcomeAllow})
+	if seen != "req-abc-123" {
+		t.Errorf("OnFinish ctx value = %v, want req-abc-123 (WithoutCancel must preserve values)", seen)
+	}
+}
+
+// TestRun_StampsRejectingPlugin verifies Pipeline.Run populates
+// pctx.RejectingPlugin() on an enforce-policy deny but leaves it
+// empty on shadow-mode denies and on allow paths.
+func TestRun_StampsRejectingPlugin(t *testing.T) {
+	tests := []struct {
+		name     string
+		onReq    func(*Context) Action
+		policy   ErrorPolicy
+		wantName string
+	}{
+		{
+			name:     "allow: RejectingPlugin empty",
+			onReq:    func(*Context) Action { return Action{Type: Continue} },
+			policy:   ErrorPolicyEnforce,
+			wantName: "",
+		},
+		{
+			name: "enforce deny: RejectingPlugin populated",
+			onReq: func(*Context) Action {
+				return Action{Type: Reject, Violation: &Violation{Code: "t", Reason: "r"}}
+			},
+			policy:   ErrorPolicyEnforce,
+			wantName: "denier",
+		},
+		{
+			name: "observe deny (shadow): RejectingPlugin empty",
+			onReq: func(*Context) Action {
+				return Action{Type: Reject, Violation: &Violation{Code: "t", Reason: "r"}}
+			},
+			policy:   ErrorPolicyObserve,
+			wantName: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &stubPlugin{name: "denier", onReq: func(_ context.Context, pctx *Context) Action {
+				return tc.onReq(pctx)
+			}}
+			p, err := New([]Plugin{s}, WithPolicies(tc.policy))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			pctx := &Context{}
+			p.Run(context.Background(), pctx)
+			if got := pctx.RejectingPlugin(); got != tc.wantName {
+				t.Errorf("RejectingPlugin = %q, want %q", got, tc.wantName)
+			}
+		})
+	}
+}
+
+// TestOutcomeFromContext_PrefersRejectingPlugin verifies the helper
+// reads pctx.RejectingPlugin() first, so a plugin that returns Reject
+// without calling pctx.Record is still classified as OutcomeDeny.
+func TestOutcomeFromContext_PrefersRejectingPlugin(t *testing.T) {
+	s := &stubPlugin{name: "no-record-denier", onReq: func(_ context.Context, _ *Context) Action {
+		// Return Reject without recording. Pre-fix this path
+		// classified as OutcomeError (StatusCode 0) or OutcomeAllow
+		// (StatusCode > 0) depending on downstream state.
+		return Action{Type: Reject, Violation: &Violation{Code: "t", Reason: "r"}}
+	}}
+	p, err := New([]Plugin{s})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	pctx := &Context{}
+	p.Run(context.Background(), pctx)
+	out := OutcomeFromContext(pctx)
+	if out.FinalAction != OutcomeDeny {
+		t.Errorf("FinalAction = %q, want deny (framework-stamped rejectingPlugin must drive classification)", out.FinalAction)
+	}
+	if out.DenyingPlugin != "no-record-denier" {
+		t.Errorf("DenyingPlugin = %q, want %q", out.DenyingPlugin, "no-record-denier")
+	}
+}
+
 // TestOutcomeFromContext covers the listener-facing derivation helper:
 // deny Invocations win, StatusCode 0 means Error, non-zero + no deny
 // means Allow. Shadow denials don't count.

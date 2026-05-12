@@ -166,6 +166,22 @@ type Context struct {
 	// than silently mutating a SessionEvent that has already been
 	// published or a response that is already on the wire.
 	inFinish bool
+
+	// rejectingPlugin is populated by Pipeline.Run / RunResponse when
+	// a plugin returns Action{Type: Reject} under the enforce policy.
+	// It is the framework-authoritative source of "which plugin denied
+	// this request," freeing OutcomeFromContext from having to walk
+	// Invocations (and freeing plugin authors from the obligation to
+	// pair Reject with a pctx.Record call). Stays empty on shadow
+	// denials (policy == observe) and on allow paths.
+	rejectingPlugin string
+
+	// finished is set at RunFinish entry to prevent accidental double
+	// dispatch from a buggy listener (two defers registered, a
+	// refactor that routes the finish call through two paths). Second
+	// call hits a WARN log and early-returns rather than
+	// double-releasing every Finisher's state.
+	finished bool
 }
 
 // SetCurrentPlugin is called by Pipeline.Run / RunResponse immediately
@@ -207,6 +223,30 @@ func (c *Context) clearCurrent() {
 	c.currentPlugin = ""
 	c.currentPhase = ""
 	c.currentPolicy = ""
+}
+
+// RejectingPlugin returns the name of the plugin whose Reject action
+// stopped the pipeline, or "" if the pipeline allowed end-to-end.
+// Populated by Pipeline.Run / RunResponse before they return; callable
+// from OnFinish, listener code, or anywhere else that needs to know
+// the denier without walking Invocations.
+//
+// Shadow-mode denials (policy == observe, where the plugin's Reject
+// was converted to a pass-through) do not set this field — the
+// framework treats shadow rejections as "the pipeline effectively
+// allowed," which matches how abctl and the session store classify
+// them.
+func (c *Context) RejectingPlugin() string { return c.rejectingPlugin }
+
+// setRejectingPlugin records the name of the plugin that returned
+// Reject. Framework-internal; callers in Pipeline.Run / RunResponse
+// set this once per request, never overwrite (first rejection wins,
+// but in practice no plugin runs after Reject so the check is
+// defensive).
+func (c *Context) setRejectingPlugin(name string) {
+	if c.rejectingPlugin == "" {
+		c.rejectingPlugin = name
+	}
 }
 
 // Record appends an Invocation to pctx under the current pipeline

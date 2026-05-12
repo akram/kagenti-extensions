@@ -148,6 +148,7 @@ func (p *Pipeline) Run(ctx context.Context, pctx *Context) Action {
 				markShadowAndLog(pctx, plugin.Name(), InvocationPhaseRequest, action, "request")
 				continue
 			}
+			pctx.setRejectingPlugin(plugin.Name())
 			logReject(plugin.Name(), action, "pipeline: plugin rejected request")
 			return action
 		}
@@ -181,6 +182,7 @@ func (p *Pipeline) RunResponse(ctx context.Context, pctx *Context) Action {
 				markShadowAndLog(pctx, p.plugins[i].Name(), InvocationPhaseResponse, action, "response")
 				continue
 			}
+			pctx.setRejectingPlugin(p.plugins[i].Name())
 			logReject(p.plugins[i].Name(), action, "pipeline: plugin rejected response")
 			return action
 		}
@@ -425,12 +427,14 @@ func (p *Pipeline) Stop(ctx context.Context) {
 // pctx.Outcome() returns non-nil for the duration of the finish chain
 // and nil everywhere else.
 //
-// Each plugin's OnFinish runs under a FRESH context derived from
-// context.Background() with p.finishTimeout applied — not from the
-// caller's ctx — so a client disconnect or earlier cancellation does
-// not abort OnFinish's I/O. Callers pass a bare ctx for future parent-
-// cancellation needs (process-wide Stop signal) but it is intentionally
-// not wired into the per-plugin ctx.
+// Each plugin's OnFinish runs under a context derived from
+// context.WithoutCancel(ctx) with p.finishTimeout applied. That means:
+//   - Cancellation of the caller-supplied ctx (client disconnect,
+//     listener shutdown signal) does NOT abort OnFinish's I/O.
+//   - Values carried on the caller-supplied ctx (slog fields, request
+//     ID, tracing span) ARE propagated into OnFinish.
+//   - Deadlines from the caller-supplied ctx are NOT inherited; the
+//     per-plugin timeout is authoritative.
 //
 // OnFinish is best-effort: a panicking plugin is recovered and logged,
 // a returning plugin's errors (there is no error return on the
@@ -438,11 +442,19 @@ func (p *Pipeline) Stop(ctx context.Context) {
 // framework. The LIFO chain continues regardless so one misbehaving
 // plugin does not leak state in earlier plugins.
 //
-// RunFinish is safe to call at most once per request. Calling it twice
-// on the same pctx would double-release state in every Finisher.
-// Listeners MUST call it in a defer wrapping the response-produce
-// block so a panic in response-writing still reaches cleanup.
-func (p *Pipeline) RunFinish(_ context.Context, pctx *Context, outcome Outcome) {
+// RunFinish is safe to call at most once per request. A second call
+// on the same pctx is rejected with a WARN log rather than double-
+// releasing Finisher state (defensive against a listener bug where
+// two defers end up registered, or a handler refactor routes the
+// finish call through two paths). Listeners MUST call it in a defer
+// wrapping the response-produce block so a panic in response-writing
+// still reaches cleanup.
+func (p *Pipeline) RunFinish(ctx context.Context, pctx *Context, outcome Outcome) {
+	if pctx.finished {
+		slog.Warn("pipeline: RunFinish called twice on the same pctx — second call dropped")
+		return
+	}
+	pctx.finished = true
 	if len(pctx.dispatched) == 0 {
 		return
 	}
@@ -463,16 +475,19 @@ func (p *Pipeline) RunFinish(_ context.Context, pctx *Context, outcome Outcome) 
 		if !ok {
 			continue
 		}
-		p.dispatchFinish(plugin.Name(), finisher, pctx)
+		p.dispatchFinish(ctx, plugin.Name(), finisher, pctx)
 	}
 }
 
-// dispatchFinish runs OnFinish on one plugin under a fresh ctx with
-// timeout, recovering any panic into a WARN log so later plugins in
-// the LIFO chain still run. Isolated in its own method so the recover
-// block's scope is exactly one plugin's dispatch.
-func (p *Pipeline) dispatchFinish(name string, f Finisher, pctx *Context) {
-	ctx, cancel := context.WithTimeout(context.Background(), p.finishTimeout)
+// dispatchFinish runs OnFinish on one plugin under a detached ctx
+// (context.WithoutCancel(parent) + finishTimeout) so the parent's
+// cancellation does not abort cleanup I/O but values and tracing
+// spans propagate. Panics are recovered into a WARN log so later
+// plugins in the LIFO chain still run. Isolated in its own method so
+// the recover block's scope is exactly one plugin's dispatch.
+func (p *Pipeline) dispatchFinish(parent context.Context, name string, f Finisher, pctx *Context) {
+	base := context.WithoutCancel(parent)
+	ctx, cancel := context.WithTimeout(base, p.finishTimeout)
 	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {

@@ -79,27 +79,36 @@ func (c *Context) Outcome() *Outcome {
 // OutcomeFromContext derives a best-effort Outcome from a pctx's final
 // state, intended for listeners that want a one-liner finish call
 // without threading outcome state through nested response / error
-// callbacks. The derivation rules:
+// callbacks. The derivation rules, checked in order:
 //
-//   - A deny Invocation on either phase → OutcomeDeny, DenyingPlugin =
-//     the most recent deny's Plugin name. Most-recent rather than
-//     first so a response-side deny (e.g. an output filter) is
-//     correctly attributed over any earlier record.
-//   - No deny Invocation AND StatusCode > 0 → OutcomeAllow. The HTTP
-//     status itself is not sufficient to classify error vs allow — a
+//   - pctx.RejectingPlugin() is non-empty → OutcomeDeny, DenyingPlugin
+//     names the rejector. Populated by the framework (Pipeline.Run /
+//     RunResponse) whenever a plugin returned Action{Type: Reject}
+//     under the enforce policy. Independent of whether the plugin
+//     paired Reject with a pctx.Record call.
+//   - Fallback: a deny Invocation on either phase → OutcomeDeny,
+//     DenyingPlugin = the most-recent deny's Plugin. Kept as
+//     defense-in-depth for bespoke dispatchers that populate
+//     Invocations directly.
+//   - No deny AND StatusCode > 0 → OutcomeAllow. The HTTP status
+//     itself is not sufficient to classify error vs allow — a
 //     legitimate 500 from the upstream is still a pipeline Allow.
-//   - No deny Invocation AND StatusCode == 0 → OutcomeError (no
-//     response was written: upstream transport failure, listener
-//     panic, etc.).
+//   - No deny AND StatusCode == 0 → OutcomeError (no response was
+//     written: upstream transport failure, listener panic, etc.).
 //
-// Listeners with more precise information at hand (a typed error from
-// the upstream transport, a listener-level reject distinct from any
-// plugin deny) should construct Outcome explicitly rather than call
-// this helper. StatusCode is taken from pctx.StatusCode verbatim.
-// Duration is left zero; RunFinish auto-fills from pctx.StartedAt
-// when left unset.
+// Listeners with no HTTP-status concept (check-only protocols like
+// ext_authz) should construct Outcome explicitly using
+// pctx.RejectingPlugin() — the "StatusCode == 0 means error" rule is
+// HTTP-listener specific. StatusCode is taken from pctx.StatusCode
+// verbatim. Duration is left zero; RunFinish auto-fills from
+// pctx.StartedAt when left unset.
 func OutcomeFromContext(pctx *Context) Outcome {
 	out := Outcome{StatusCode: pctx.StatusCode}
+	if denier := pctx.RejectingPlugin(); denier != "" {
+		out.FinalAction = OutcomeDeny
+		out.DenyingPlugin = denier
+		return out
+	}
 	if denier, ok := lastDenyingPlugin(pctx); ok {
 		out.FinalAction = OutcomeDeny
 		out.DenyingPlugin = denier
@@ -116,6 +125,9 @@ func OutcomeFromContext(pctx *Context) Outcome {
 // lastDenyingPlugin walks pctx.Extensions.Invocations in reverse (both
 // directions) looking for the most-recent deny-action record. Returns
 // the plugin name and true if found; "", false otherwise.
+//
+// Secondary to pctx.RejectingPlugin(); kept as defense-in-depth for
+// bespoke dispatchers that bypass Pipeline.Run.
 func lastDenyingPlugin(pctx *Context) (string, bool) {
 	if pctx.Extensions.Invocations == nil {
 		return "", false
