@@ -45,8 +45,6 @@ spec:
   template:
     metadata:
       labels:
-        # SPIFFE → Keycloak client sidecar (label, not annotation — see kagenti backend constants)
-        kagenti.io/client-registration-inject: "true"
         # Required for AuthBridge + SPIRE injection (webhook does not match type=tool)
         kagenti.io/type: agent
         app.kubernetes.io/name: weather-tool-advanced

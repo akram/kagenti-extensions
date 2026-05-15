@@ -160,7 +160,12 @@ When `combinedSidecar: true`, the per-sidecar feature gates and workload labels 
 
 - **`spiffeHelper: false`** or `kagenti.io/spiffe-helper-inject: "false"`: The combined container starts with `SPIRE_ENABLED=false` — spiffe-helper is not launched, and a static client ID is used instead.
 - **`clientRegistration: false`**: The combined container starts with `CLIENT_REGISTRATION_ENABLED=false` — client registration is skipped.
-- **Default** (label not `true`): operator-managed registration; combined authbridge uses `CLIENT_REGISTRATION_ENABLED=false` unless **`kagenti.io/client-registration-inject: "true"`** opts in to the legacy registration slice.
+- **Client registration**: operator-managed only. The legacy
+  `kagenti.io/client-registration-inject: "true"` label opted into an
+  in-pod `kagenti-client-registration` sidecar that was removed in
+  #411 — setting it today silently disables registration entirely
+  (the operator's `SkipReason` honors the label and steps aside, and
+  the legacy sidecar isn't there to take over). Don't set it.
 - **`envoyProxy: false`** or `kagenti.io/envoy-proxy-inject: "false"`: No combined container is injected at all (the proxy is the core component).
 
 Then continue with:

@@ -54,11 +54,15 @@ On current platforms, **three things** are required together for the full demo:
    `kagenti.io/type: agent` (the image is still `weather_tool`; only the API
    classification changes).
 
-3. **`kagenti.io/client-registration-inject: "true"` label** (not annotation) on
-   the **pod template** so the **legacy** `kagenti-client-registration` sidecar
-   runs and registers the SPIFFE client in Keycloak. Without it, the operator’s
-   default is operator-managed registration and `setup_keycloak ... --wait-tool-client`
-   may never see the tool client.
+3. **Operator-managed Keycloak client registration**. The operator's
+   `ClientRegistrationReconciler` watches `kagenti.io/type: agent` pods and
+   creates the SPIFFE-shaped client in Keycloak (and the corresponding
+   `kagenti-keycloak-client-credentials-<hash>` Secret). The legacy
+   `kagenti.io/client-registration-inject: "true"` label is **no longer
+   used** — it referenced an in-pod `kagenti-client-registration`
+   sidecar that was removed in #411. Setting that label today disables
+   operator-managed registration and leaves the workload with no
+   credentials at all.
 
 ## Architecture
 
