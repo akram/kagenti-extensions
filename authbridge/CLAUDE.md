@@ -413,7 +413,7 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 ## Code Conventions
 
 ### Go (authlib, cmd/authbridge-{proxy,envoy,lite}, demo-app)
-- Go 1.25
+- Go 1.24
 - Modules: `authbridge/authlib/` (pure library — all listeners, all plugins) and `authbridge/cmd/authbridge-{proxy,envoy,lite}/` (mode-specific binaries that wire listeners + plugins together)
 - `authbridge/go.work` workspace links the modules for local development
 - Logging with `log/slog`; the binaries log under their own name (`authbridge-proxy`, `authbridge-envoy`, `authbridge-lite`)

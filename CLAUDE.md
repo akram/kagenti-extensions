@@ -64,7 +64,7 @@ kagenti-extensions/
 **Three mode-specific binaries** providing transparent traffic interception for both inbound JWT validation and outbound OAuth 2.0 token exchange (RFC 8693). Each binary is hardcoded to its deployment shape; mode is no longer selected at runtime.
 
 **Library:** `authbridge/authlib/` (shared)
-**Language:** Go 1.25
+**Language:** Go 1.24
 **Detailed guide:** [`authbridge/CLAUDE.md`](authbridge/CLAUDE.md)
 
 **Binaries:**
