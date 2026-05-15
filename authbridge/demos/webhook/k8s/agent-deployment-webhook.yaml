@@ -1,16 +1,21 @@
 # Agent Deployment for AuthBridge Webhook Demo
 #
-# This deployment uses the kagenti-operator webhook to automatically inject:
-# - proxy-init (init container for iptables setup)
-# - spiffe-helper (SPIFFE credential fetcher) - only with kagenti.io/spire: enabled
-# - kagenti-client-registration (registers with Keycloak)
-# - envoy-proxy (intercepts traffic and performs token exchange)
+# This deployment uses the kagenti-operator webhook to automatically inject
+# a single combined AuthBridge sidecar (post-#411). The exact shape depends
+# on the resolved AuthBridge mode:
+# - proxy-sidecar (default): one container, "authbridge-proxy", from the
+#   "authbridge" image. spiffe-helper is bundled inside; gated by SPIRE_ENABLED.
+# - envoy-sidecar: a "proxy-init" init container (iptables) plus one
+#   container, "envoy-proxy", from the "authbridge-envoy" image (Envoy +
+#   ext_proc + bundled spiffe-helper).
+# Keycloak client registration is operator-managed (no in-pod sidecar);
+# the webhook mounts the resulting Secret at /shared/client-{id,secret}.txt.
 #
 # The agent container runs auth-proxy, which:
 # - Listens on port 8080
 # - Forwards requests to auth-target-service:8081
-# - JWT validation is handled by the inbound ext-proc (injected by webhook)
-# - Token exchange is handled by the outbound ext-proc (injected by webhook)
+# - JWT validation is handled by the inbound AuthBridge sidecar (injected by webhook)
+# - Token exchange is handled by the outbound AuthBridge sidecar (injected by webhook)
 #
 # Labels (must be on Pod template, not just Deployment):
 #   kagenti.io/type: agent      - Required: identifies this as an agent workload

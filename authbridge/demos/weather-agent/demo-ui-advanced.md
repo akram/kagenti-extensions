@@ -218,20 +218,24 @@ If the UI backend cannot yet express the route list, apply
 
 ```bash
 kubectl get pods -n team1 | grep advanced
-# Expect 4/4 (or combined sidecar variant) for both workloads when injection is on.
+# Expect 2/2 for both workloads when injection is on (proxy-sidecar
+# default = agent + authbridge-proxy; envoy-sidecar = agent + envoy-proxy
+# plus the proxy-init init container).
 ```
 
 ### Tool ingress logs
 
 ```bash
-kubectl logs deployment/weather-tool-advanced -n team1 -c envoy-proxy 2>&1 | grep "\[Inbound\]"
-# or -c authbridge when combinedSidecar is enabled
+# Container name depends on the resolved AuthBridge mode:
+#   proxy-sidecar (default): -c authbridge-proxy
+#   envoy-sidecar:           -c envoy-proxy
+kubectl logs deployment/weather-tool-advanced -n team1 -c authbridge-proxy 2>&1 | grep "\[Inbound\]"
 ```
 
 ### Agent outbound exchange logs
 
 ```bash
-kubectl logs deployment/weather-service-advanced -n team1 -c envoy-proxy 2>&1 | grep -E "Resolver|exchange|Injecting token"
+kubectl logs deployment/weather-service-advanced -n team1 -c authbridge-proxy 2>&1 | grep -E "Resolver|exchange|Injecting token"
 ```
 
 ### CLI token + A2A
@@ -280,7 +284,8 @@ Environment variables:
 | `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | For admin REST calls from the verify pod |
 
 The script also **warns** if it cannot find obvious inbound/outbound log markers
-(lines differ slightly when `combinedSidecar` is enabled).
+(the container name it inspects depends on the resolved AuthBridge mode —
+`authbridge-proxy` for proxy-sidecar, `envoy-proxy` for envoy-sidecar).
 
 ## Cleanup
 

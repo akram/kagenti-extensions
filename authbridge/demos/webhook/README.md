@@ -26,29 +26,24 @@ In both modes, Keycloak client registration is handled by the kagenti-operator's
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                        Agent Pod                                   │
-│  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────────┐ │
-│  │   agent     │  │spiffe-helper │  │kagenti-client-registration │ |
-│  │ (your app)  │  │              │  │                            │ │
-│  └──────┬──────┘  └──────────────┘  └────────────────────────────┘ │
-│         │                                                          │
-│         │ HTTP Request with Token (aud: agent-spiffe-id)           │
-│         ▼                                                          │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │                    envoy-proxy                              │   │
-│  │  Inbound (port 15124):                                      │   │
-│  │    1. Intercepts incoming traffic (via iptables PREROUTING) │   │
-│  │    2. Validates JWT (signature + issuer via JWKS)            │   │
-│  │    3. Returns 401 if invalid, forwards if valid              │   │
-│  │  Outbound (port 15123):                                     │   │
-│  │    1. Intercepts outbound traffic (via iptables OUTPUT)     │   │
-│  │    2. Detects protocol via tls_inspector                    │   │
-│  │    HTTP: Extracts Bearer token, exchanges via Keycloak,     │   │
-│  │          replaces token in request                          │   │
-│  │    HTTPS: Passes through as-is (TLS passthrough)            │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-└────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Agent Pod                                    │
+│  ┌─────────────┐         ┌──────────────────────────────────────┐   │
+│  │   agent     │ ───────▶│  AuthBridge sidecar                  │   │
+│  │ (your app)  │  HTTP   │   container name = mode-dependent:   │   │
+│  └─────────────┘  with   │     proxy-sidecar: authbridge-proxy  │   │
+│                   token  │     envoy-sidecar: envoy-proxy       │   │
+│                          │                                      │   │
+│                          │  Inbound: validates JWT, returns     │   │
+│                          │    401 on invalid/missing             │   │
+│                          │  Outbound: routes via authproxy-routes;│ │
+│                          │    HTTP → token-exchange via Keycloak;│  │
+│                          │    HTTPS → TLS passthrough           │   │
+│                          │                                      │   │
+│                          │  spiffe-helper bundled inside        │   │
+│                          │   (gated by SPIRE_ENABLED)           │   │
+│                          └──────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
                               │
                               │ HTTP Request with Exchanged Token
                               ▼
@@ -57,6 +52,11 @@ In both modes, Keycloak client registration is handled by the kagenti-operator's
                     │ (validates aud: │
                     │  auth-target)   │
                     └─────────────────┘
+
+# Out-of-band: kagenti-operator's ClientRegistrationReconciler creates
+# the Keycloak client + a kagenti-keycloak-client-credentials-<hash>
+# Secret. The webhook mounts that Secret into the AuthBridge sidecar at
+# /shared/client-{id,secret}.txt — no in-pod registration sidecar.
 ```
 
 ## Prerequisites
