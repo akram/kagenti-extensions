@@ -30,14 +30,20 @@ kagenti-extensions/
 │   │   ├── routing/          #     Host-to-audience router
 │   │   ├── auth/             #     HandleInbound + HandleOutbound composition
 │   │   └── config/           #     Mode presets, YAML config, validation
-│   ├── cmd/authbridge/       #   Unified binary + combined Dockerfiles + entrypoints
-│   │   ├── listener/         #     Protocol adapters (ext_proc, ext_authz)
-│   │   ├── Dockerfile.envoy  #     envoy-sidecar combined image
-│   │   ├── Dockerfile.proxy  #     proxy-sidecar combined image (default)
-│   │   ├── entrypoint-envoy.sh
-│   │   └── entrypoint-proxy.sh
-│   ├── cmd/authbridge-proxy/ #   Lite binary — proxy-sidecar mode only
-│   ├── cmd/authbridge-envoy/ #   Lite binary — envoy-sidecar mode only
+│   ├── cmd/authbridge-proxy/ #   proxy-sidecar mode (default): HTTP forward + reverse
+│   │   │                     #   proxies, full plugin set including parsers
+│   │   ├── main.go
+│   │   ├── Dockerfile        #     proxy-sidecar combined image
+│   │   └── entrypoint.sh
+│   ├── cmd/authbridge-envoy/ #   envoy-sidecar mode: ext_proc gRPC server, full plugin set
+│   │   ├── main.go
+│   │   ├── Dockerfile        #     envoy-sidecar combined image
+│   │   └── entrypoint.sh
+│   ├── cmd/authbridge-lite/  #   proxy-sidecar mode, lite plugin set (no parsers)
+│   │   │                     #   for size-optimized deployments
+│   │   ├── main.go
+│   │   ├── Dockerfile        #     proxy-sidecar lite combined image
+│   │   └── entrypoint.sh
 │   ├── authproxy/            #   iptables init container + standalone quickstart
 │   │   ├── quickstart/       #     Standalone demo (no SPIFFE)
 │   │   └── k8s/              #     Standalone K8s manifests
@@ -53,22 +59,26 @@ kagenti-extensions/
 
 ## Major Components
 
-### 1. AuthBridge Unified Binary (Go)
+### 1. AuthBridge Binaries (Go)
 
-A **single binary** providing transparent traffic interception for both inbound JWT validation and outbound OAuth 2.0 token exchange (RFC 8693), supporting three deployment modes.
+**Three mode-specific binaries** providing transparent traffic interception for both inbound JWT validation and outbound OAuth 2.0 token exchange (RFC 8693). Each binary is hardcoded to its deployment shape; mode is no longer selected at runtime.
 
-**Location:** `authbridge/cmd/authbridge/`
-**Library:** `authbridge/authlib/`
+**Library:** `authbridge/authlib/` (shared)
 **Language:** Go 1.24
 **Detailed guide:** [`authbridge/CLAUDE.md`](authbridge/CLAUDE.md)
 
-**Core components:**
-- `cmd/authbridge/main.go` — Unified binary (ext_proc, ext_authz, forward/reverse proxy modes)
-- `authlib/` — Shared auth library (JWT validation, token exchange, caching, routing)
-- `authproxy/init-iptables.sh` — Traffic interception setup (Istio ambient mesh compatible)
-- `authproxy/Dockerfile.init` — Init container image
+**Binaries:**
+- `cmd/authbridge-proxy/` — proxy-sidecar mode (default): HTTP forward + reverse proxies, full plugin set (jwt-validation, token-exchange, a2a-parser, mcp-parser, inference-parser). No Envoy / no gRPC.
+- `cmd/authbridge-envoy/` — envoy-sidecar mode: ext_proc gRPC server hooked into Envoy, full plugin set.
+- `cmd/authbridge-lite/` — proxy-sidecar mode, lite plugin set (auth gates only, parsers dropped) for size-optimized deployments.
 
-**Ports:** 15123 (outbound), 15124 (inbound), 9090 (ext-proc/ext-authz), 9901 (admin), 9093 (stats and config)
+**Common:**
+- `authlib/` — shared auth library (JWT validation, token exchange, caching, routing, all listener implementations, all plugins).
+- `authproxy/init-iptables.sh` — traffic interception setup (Istio ambient mesh compatible). Used by envoy-sidecar mode only.
+- `authproxy/Dockerfile.init` — proxy-init container image.
+
+**Ports (envoy-sidecar):** 15123 (outbound), 15124 (inbound), 9090 (ext-proc), 9901 (admin)
+**Ports (proxy-sidecar / lite):** 8080 (reverse proxy), 8081 (forward proxy), 9091 (health), 9093 (stats), 9094 (session API)
 
 ### 2. Client Registration
 
@@ -108,34 +118,29 @@ into workload pods. Default deployment shape (proxy-sidecar mode):
          and add a proxy-init container for iptables.
 ```
 
-## Unified AuthBridge Binary
+## AuthBridge Binaries
 
-The `cmd/authbridge/` directory contains a unified binary that replaces three separate
-codebases (go-processor, waypoint, klaviger) with a single binary supporting three modes:
+Three mode-specific binaries, one Dockerfile per binary:
 
-| Mode | Interception | Listeners | Use Case |
-|------|-------------|-----------|----------|
-| `envoy-sidecar` | Envoy iptables + ext_proc | gRPC ext_proc on :9090 | Sidecar per agent pod |
-| `waypoint` | Istio ambient + ext_authz | gRPC ext_authz + HTTP forward proxy | Shared service |
-| `proxy-sidecar` | Reverse proxy + forward proxy | HTTP reverse proxy + forward proxy | Sidecar without Envoy |
+| Binary | Mode | Listeners | Plugins |
+|--------|------|-----------|---------|
+| `cmd/authbridge-proxy/` | proxy-sidecar (default) | HTTP forward + reverse proxies | full (incl. parsers) |
+| `cmd/authbridge-envoy/` | envoy-sidecar | gRPC ext_proc on :9090 | full (incl. parsers) |
+| `cmd/authbridge-lite/` | proxy-sidecar | HTTP forward + reverse proxies | auth-only (jwt-validation + token-exchange, no parsers) |
 
 **Go modules:**
-- `authbridge/authlib/` — pure library, no protocol deps (validation, exchange, cache, bypass, spiffe, routing, auth, config)
-- `authbridge/cmd/authbridge/` — binary + listeners, imports authlib + gRPC/Envoy deps
-- `authbridge/go.work` — workspace linking both modules for local development
+- `authbridge/authlib/` — pure library: validation, exchange, cache, bypass, spiffe, routing, auth, config, all listener implementations, all plugins.
+- `authbridge/cmd/authbridge-{proxy,envoy,lite}/` — thin main packages that import authlib and start the listeners they need.
+- `authbridge/go.work` — workspace linking authlib + the binaries for local development.
 
-**Config format:** YAML with `${ENV_VAR}` expansion, mode presets, and startup validation.
-Supports `keycloak_url` + `keycloak_realm` derivation for operator compatibility.
-
-**Image:** `ghcr.io/kagenti/kagenti-extensions/authbridge-unified` — Envoy + authbridge
-in one container (drop-in replacement for `envoy-with-processor`).
+**Config format:** YAML with `${ENV_VAR}` expansion, mode presets, and startup validation. Supports `keycloak_url` + `keycloak_realm` derivation for operator compatibility. The `mode` field in YAML must match the binary (each binary rejects mismatched modes at boot).
 
 ## CI/CD Workflows
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `ci.yaml` | PR to main/release-* | Go fmt, vet, build, test for authproxy, authlib, and cmd/authbridge; Python tests |
-| `build.yaml` | Tag push (`v*`) or manual | Multi-arch Docker builds for: client-registration, auth-proxy, proxy-init, authbridge, authbridge-unified, spiffe-helper, demo-app |
+| `ci.yaml` | PR to main/release-* | Go fmt, vet, build, test for authproxy, authlib, and the cmd/authbridge-* binaries; Python tests |
+| `build.yaml` | Tag push (`v*`) or manual | Multi-arch Docker builds for: proxy-init, authbridge (proxy-sidecar combined), authbridge-envoy (envoy-sidecar combined), authbridge-lite (proxy-sidecar lite combined) |
 | `security-scans.yaml` | PR to main | Dependency review, shellcheck, YAML lint, Hadolint, Bandit, Trivy, CodeQL |
 | `scorecard.yaml` | Weekly / push to main | OpenSSF Scorecard security health metrics |
 | `spellcheck_action.yml` | PR | Spellcheck on markdown files |
@@ -157,12 +162,13 @@ All images are pushed to `ghcr.io/kagenti/kagenti-extensions/` from
 
 | Image | Source | Description |
 |-------|--------|-------------|
-| **`authbridge`** | **`authbridge/cmd/authbridge/Dockerfile.proxy`** | **proxy-sidecar combined image (default mode): authbridge-proxy + spiffe-helper. No Envoy.** |
-| `authbridge-envoy` | `authbridge/cmd/authbridge/Dockerfile.envoy` | envoy-sidecar combined image: Envoy + authbridge (ext_proc) + spiffe-helper |
+| **`authbridge`** | **`authbridge/cmd/authbridge-proxy/Dockerfile`** | **proxy-sidecar combined image (default mode): authbridge-proxy (full plugin set incl. parsers) + spiffe-helper. No Envoy.** |
+| `authbridge-envoy` | `authbridge/cmd/authbridge-envoy/Dockerfile` | envoy-sidecar combined image: Envoy + authbridge-envoy (ext_proc, full plugin set) + spiffe-helper |
+| `authbridge-lite` | `authbridge/cmd/authbridge-lite/Dockerfile` | proxy-sidecar lite combined image: authbridge-lite (auth gates only, parsers dropped) + spiffe-helper. Same listener layout as `authbridge`; not yet referenced by the operator's default config |
 | `proxy-init` | `authbridge/authproxy/Dockerfile.init` | Alpine + iptables init container (envoy-sidecar mode only) |
 
-In both combined images, `spiffe-helper` is started conditionally based
-on the `SPIRE_ENABLED` env var (set by the operator when SPIRE
+In all three combined images, `spiffe-helper` is started conditionally
+based on the `SPIRE_ENABLED` env var (set by the operator when SPIRE
 identity is enabled for the workload).
 
 The legacy `authbridge-unified`, `authbridge-light`, `client-registration`,

@@ -93,12 +93,19 @@ jobs:
         run: go test -v -race -cover ./...
 
   go-ci-authbridge-cmd:
-    name: Go CI (authbridge cmd)
+    name: Go CI (authbridge ${{ matrix.binary }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        binary:
+          - authbridge-proxy
+          - authbridge-envoy
+          - authbridge-lite
     defaults:
       run:
-        working-directory: authbridge/cmd/authbridge
+        working-directory: authbridge/cmd/${{ matrix.binary }}
     env:
       # Disable go.work — the workspace at authbridge/ includes ./authproxy
       # which would pull in that module's dependencies. The replace directive
@@ -109,8 +116,8 @@ jobs:
 
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6
         with:
-          go-version-file: authbridge/cmd/authbridge/go.mod
-          cache-dependency-path: authbridge/cmd/authbridge/go.sum
+          go-version-file: authbridge/cmd/${{ matrix.binary }}/go.mod
+          cache-dependency-path: authbridge/cmd/${{ matrix.binary }}/go.sum
 
       - name: Lint
         run: |

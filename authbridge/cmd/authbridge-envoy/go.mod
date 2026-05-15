@@ -7,7 +7,6 @@ toolchain go1.24.5
 require (
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
 	github.com/kagenti/kagenti-extensions/authbridge/authlib v0.0.0-00010101000000-000000000000
-	github.com/kagenti/kagenti-extensions/authbridge/cmd/authbridge v0.0.0-00010101000000-000000000000
 	google.golang.org/grpc v1.80.0
 )
 
@@ -36,5 +35,3 @@ require (
 )
 
 replace github.com/kagenti/kagenti-extensions/authbridge/authlib => ../../authlib
-
-replace github.com/kagenti/kagenti-extensions/authbridge/cmd/authbridge => ../authbridge

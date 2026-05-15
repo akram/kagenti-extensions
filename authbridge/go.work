@@ -4,7 +4,7 @@ use (
 	./authlib
 	./authproxy
 	./cmd/abctl
-	./cmd/authbridge
 	./cmd/authbridge-envoy
+	./cmd/authbridge-lite
 	./cmd/authbridge-proxy
 )
