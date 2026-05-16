@@ -18,7 +18,6 @@ more AuthBridge capabilities.
 | **[Weather Agent](weather-agent/demo-ui.md)** | Beginner | Inbound JWT validation, automatic identity registration, outbound passthrough | UI |
 | **[Weather Agent (advanced)](weather-agent/demo-ui-advanced.md)** | Intermediate | Inbound on agent **and** tool, outbound token exchange, ingress JWT verification on the tool | [kubectl + script](weather-agent/demo-ui-advanced.md#automated-deploy-and-verify-ci-oriented) |
 | **[GitHub Issue Agent](github-issue/demo.md)** | Intermediate | Inbound validation + outbound token exchange + scope-based access control | [UI](github-issue/demo-ui.md) or [Manual](github-issue/demo-manual.md) |
-| **[Webhook](webhook/README.md)** | Intermediate | Webhook-based sidecar injection with auth-target demo app | Manual |
 | **[Token-Exchange Routes](token-exchange-routes/README.md)** | Reference | How to write `authproxy-routes` for single- and multi-target token exchange | Configuration only |
 | **[MCP Parser Plugin](mcp-parser/README.md)** | Reference | Enable the `mcp-parser` plugin to surface tool calls / resource reads in session events | Configuration only |
 | **[abctl Walkthrough](weather-agent/demo-with-abctl.md)** | Reference | Watch the AuthBridge plugin pipeline live with the `abctl` TUI | Tooling only |
@@ -69,12 +68,6 @@ more AuthBridge capabilities.
 - Subject preservation through exchange (`sub` claim maintained)
 - Scope-based access control: Alice (public repos) vs Bob (all repos)
 - Comprehensive CLI testing and AuthProxy log verification
-
-### Webhook Demo
-- Demonstrates the [kagenti-operator](https://github.com/kagenti/kagenti-operator) sidecar injection mechanism
-- Deploys a generic agent + auth-target (not a real-world agent)
-- Tests inbound validation and outbound token exchange end-to-end
-- Good for understanding the injection labels and ConfigMap requirements
 
 ### Token-Exchange Routes (Configuration Reference)
 - How AuthBridge resolves the request `Host` header to a route entry

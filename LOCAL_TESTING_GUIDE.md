@@ -16,7 +16,8 @@
 > **Working alternatives in the meantime**:
 > - `authbridge/demos/weather-agent/demo-ui-advanced.md` — current
 >   reference for the combined-sidecar flow with SPIFFE.
-> - `authbridge/demos/webhook/README.md` — webhook-injected demo.
+> - `authbridge/demos/github-issue/demo-ui.md` — full token-exchange
+>   flow with scope-based access control.
 
 This guide walks you through testing JWT-SVID authentication using local images (no push to ghcr.io).
 
@@ -470,7 +471,7 @@ For testing the complete AuthBridge flow with automatic sidecar injection:
 
 **Manual Demo:** Follow [authbridge/demos/github-issue/demo-manual.md](authbridge/demos/github-issue/demo-manual.md)
 
-**Webhook Demo:** Follow [authbridge/demos/webhook/README.md](authbridge/demos/webhook/README.md)
+**Token-Exchange Routes:** Follow [authbridge/demos/token-exchange-routes/README.md](authbridge/demos/token-exchange-routes/README.md)
 
 ---
 

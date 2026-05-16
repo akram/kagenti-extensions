@@ -11,8 +11,8 @@ Pair it with one of the deployment demos for a working stack:
 
 - [`weather-agent/demo-ui-advanced.md`](../weather-agent/demo-ui-advanced.md)
   — agent + tool with token exchange, runs end-to-end.
-- [`webhook/README.md`](../webhook/README.md) — manual webhook
-  injection with the auth-target demo app.
+- [`github-issue/demo.md`](../github-issue/demo.md) — agent + tool
+  with token exchange and scope-based access control.
 
 ## How outbound routing works
 
@@ -201,5 +201,6 @@ rejected the call.
   — full `token-exchange` plugin reference.
 - [`weather-agent/demo-ui-advanced.md`](../weather-agent/demo-ui-advanced.md)
   — end-to-end demo that exercises the single-target route pattern.
-- [`webhook/README.md`](../webhook/README.md) — webhook injection
-  walkthrough that the routes here plug into.
+- [`github-issue/demo.md`](../github-issue/demo.md) — multi-feature
+  demo (token exchange + scope-based access) that the routes here
+  plug into.

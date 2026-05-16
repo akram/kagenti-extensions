@@ -103,7 +103,7 @@ echo ""
 echo "=========================================="
 echo "Building proxy-init"
 echo "=========================================="
-cd "${SCRIPT_DIR}/authbridge/authproxy"
+cd "${SCRIPT_DIR}/authbridge/proxy-init"
 ${CONTAINER_RUNTIME} build -f Dockerfile.init -t ghcr.io/kagenti/kagenti-extensions/proxy-init:local .
 load_image_to_kind ghcr.io/kagenti/kagenti-extensions/proxy-init:local
 echo "✅ Built and loaded: proxy-init:local"

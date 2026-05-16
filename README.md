@@ -6,9 +6,15 @@ Kubernetes security extensions for the [Kagenti](https://github.com/kagenti/kage
 
 [AuthBridge](./authbridge/) provides end-to-end authentication for Kubernetes workloads with [SPIFFE/SPIRE](https://spiffe.io) integration. It consists of:
 
-- **[AuthProxy](./authbridge/authproxy/)** — Envoy proxy with a gRPC external processor for inbound JWT validation and outbound OAuth 2.0 token exchange (RFC 8693). Enables secure service-to-service communication by transparently intercepting traffic.
-- **[Client Registration](./authbridge/client-registration/)** — Automatically registers Kubernetes workloads as Keycloak OAuth2 clients using their SPIFFE identity, eliminating manual client configuration and static credentials.
+- **[Authlib](./authbridge/authlib/)** — shared Go library: JWT validation, RFC 8693 token exchange, plugin pipeline, listener implementations.
+- **Mode-specific binaries** under [`authbridge/cmd/`](./authbridge/cmd/):
+  - [`authbridge-proxy`](./authbridge/cmd/authbridge-proxy/) — proxy-sidecar (default): HTTP forward + reverse proxies, full plugin set.
+  - [`authbridge-envoy`](./authbridge/cmd/authbridge-envoy/) — envoy-sidecar: ext_proc gRPC server hooked into Envoy, full plugin set.
+  - [`authbridge-lite`](./authbridge/cmd/authbridge-lite/) — proxy-sidecar with auth-only plugins (no parsers); for size-constrained deployments.
+- **[proxy-init](./authbridge/proxy-init/)** — iptables init container used by envoy-sidecar mode for transparent traffic interception.
 - **[Keycloak Sync](./authbridge/keycloak_sync.py)** — Declarative tool for synchronizing Keycloak configuration.
+
+Keycloak client registration runs in the [kagenti-operator](https://github.com/kagenti/kagenti-operator) (separate repo, post-#411 / kagenti-operator#361 — no in-pod registration sidecar).
 
 See the [AuthBridge README](./authbridge/README.md) for architecture details and the [demos index](./authbridge/demos/README.md) for getting started.
 

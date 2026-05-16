@@ -2,7 +2,7 @@
 
 AuthBridge provides **secure, transparent token management** for Kubernetes workloads. It combines automatic [client registration](./client-registration/) with [token exchange](./authproxy/) capabilities, enabling zero-trust authentication flows with [SPIFFE/SPIRE](https://spiffe.io) integration.
 
-> **📘 Looking to run the demo?** See the [Weather Agent](./demos/weather-agent/demo-ui.md) or [Webhook](./demos/webhook/README.md) demos for step-by-step instructions, and [Token-Exchange Routes](./demos/token-exchange-routes/README.md) for route configuration.
+> **📘 Looking to run the demo?** See the [Weather Agent](./demos/weather-agent/demo-ui.md) or [GitHub Issue Agent](./demos/github-issue/demo.md) demos for step-by-step instructions, and [Token-Exchange Routes](./demos/token-exchange-routes/README.md) for route configuration.
 
 ## Deployment Modes
 
@@ -345,7 +345,7 @@ The easiest way to get all prerequisites is to use the [Kagenti Ansible installe
 
 ### Demos
 
-- **[Webhook Demo](./demos/webhook/README.md)** - Shows how the [kagenti-operator](https://github.com/kagenti/kagenti-operator) webhook automatically injects AuthBridge sidecars into your deployments (recommended starting point)
+- **[Weather Agent Demo](./demos/weather-agent/demo-ui.md)** - Recommended starting demo: shows how the [kagenti-operator](https://github.com/kagenti/kagenti-operator) webhook automatically injects the combined AuthBridge sidecar, with inbound JWT validation and outbound passthrough
 - **[GitHub Issue Agent Demo](./demos/github-issue/demo.md)** - End-to-end demo with the real GitHub Issue Agent and GitHub MCP Tool, showing transparent token exchange via AuthBridge
   - [Manual deployment](./demos/github-issue/demo-manual.md) — deploy everything via `kubectl` and YAML manifests
   - [UI deployment](./demos/github-issue/demo-ui.md) — import agent and tool via the Kagenti dashboard

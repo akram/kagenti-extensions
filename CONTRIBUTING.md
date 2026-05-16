@@ -32,7 +32,7 @@ cd kagenti-extensions
 pre-commit install
 
 # Build AuthProxy images
-cd authbridge/authproxy && make build-images
+cd authbridge/proxy-init && make build-images
 ```
 
 ## Issues
