@@ -1,0 +1,260 @@
+# IBAC demo email-assistant agent — fully self-contained.
+#
+# Two ConfigMaps are in this manifest:
+#
+#   ibac-agent-config-no-ibac
+#       a2a-parser inbound, mcp-parser outbound. NO ibac plugin.
+#       The "without IBAC" baseline — exfiltration succeeds.
+#
+#   ibac-agent-config-ibac
+#       a2a-parser inbound, mcp-parser + ibac outbound.
+#       The "with IBAC" run — judge denies misaligned outbound.
+#
+# The agent Pod's volume mount points at ibac-agent-config (no
+# suffix) — the demo Makefile uses kubectl to copy whichever variant
+# we want into that name. Authbridge's hot-reload picks up the change
+# automatically; no pod restart needed.
+#
+# This manifest does NOT depend on the kagenti operator. The
+# authbridge sidecar is declared inline so the demo runs against any
+# kind / minikube cluster after `make deploy`. The image references
+# `authbridge:demo` — see Makefile for build instructions; the demo
+# does NOT pull a published authbridge image because it must include
+# the IBAC plugin from this branch.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ibac-agent-config-no-ibac
+  namespace: ibac-demo
+data:
+  config.yaml: |
+    mode: proxy-sidecar
+
+    listener:
+      reverse_proxy_addr: ":8080"
+      reverse_proxy_backend: "http://localhost:8000"
+      forward_proxy_addr: ":8081"
+      session_api_addr: ":9094"
+
+    session:
+      enabled: true
+
+    pipeline:
+      inbound:
+        plugins:
+          # a2a-parser populates Session.Intents from the user's A2A
+          # message. IBAC reads from this via pctx.Session.LastIntent.
+          - name: a2a-parser
+      outbound:
+        plugins:
+          # mcp-parser is optional enrichment for IBAC. Included here
+          # for completeness; for the email-poison demo specifically
+          # the agent's tools emit raw HTTP, not MCP, so mcp-parser's
+          # MCPExtension stays nil and IBAC judges the bare HTTP line.
+          - name: mcp-parser
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ibac-agent-config-ibac
+  namespace: ibac-demo
+data:
+  config.yaml: |
+    mode: proxy-sidecar
+
+    listener:
+      reverse_proxy_addr: ":8080"
+      reverse_proxy_backend: "http://localhost:8000"
+      forward_proxy_addr: ":8081"
+      session_api_addr: ":9094"
+
+    session:
+      enabled: true
+
+    pipeline:
+      inbound:
+        plugins:
+          - name: a2a-parser
+      outbound:
+        plugins:
+          - name: mcp-parser
+          - name: ibac
+            config:
+              # Judge LLM. host.docker.internal works for kind clusters
+              # with ollama running on the host, matching the original
+              # huang195/ibac demo. For in-cluster ollama, swap this for
+              # http://ollama.<ns>.svc.cluster.local:11434.
+              judge_endpoint: "http://host.docker.internal:11434"
+              judge_model: "llama3.2:3b"
+
+              # Reasonable default for a local ollama judge; bump if your
+              # judge model is larger / slower.
+              timeout_ms: 15000
+
+              # Don't judge the agent's own LLM-reasoning calls (default).
+              # The agent_llm_host hint adds ollama to the bypass list so
+              # those calls are skipped without judging at all.
+              judge_inference: false
+              agent_llm_host: "host.docker.internal"
+
+              # Bypass infrastructure paths. The defaults already cover
+              # /healthz and friends; we add nothing extra here for the
+              # demo.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ibac-agent-config
+  namespace: ibac-demo
+  annotations:
+    # The Makefile rewrites this annotation when toggling between
+    # variants — purely for human inspection (`kubectl get cm
+    # ibac-agent-config -o yaml`); authbridge does not consume it.
+    ibac-demo/active: "no-ibac"
+data:
+  config.yaml: |
+    mode: proxy-sidecar
+
+    listener:
+      reverse_proxy_addr: ":8080"
+      reverse_proxy_backend: "http://localhost:8000"
+      forward_proxy_addr: ":8081"
+      session_api_addr: ":9094"
+
+    session:
+      enabled: true
+
+    pipeline:
+      inbound:
+        plugins:
+          - name: a2a-parser
+      outbound:
+        plugins:
+          - name: mcp-parser
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ibac-agent
+  namespace: ibac-demo
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ibac-agent
+  namespace: ibac-demo
+  labels:
+    app.kubernetes.io/name: ibac-agent
+    app.kubernetes.io/part-of: ibac-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ibac-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ibac-agent
+    spec:
+      serviceAccountName: ibac-agent
+      containers:
+        # ----- Agent (the email assistant with vulnerable tools) -----
+        - name: agent
+          image: ibac-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            # All outbound HTTP from the agent flows through the
+            # authbridge forward proxy. Go's default transport honors
+            # this env var (see agent/main.go:execHTTPPost).
+            - name: HTTP_PROXY
+              value: "http://localhost:8081"
+            # PORT mismatch is intentional: the agent listens on 8000;
+            # authbridge's reverse proxy listens on 8080 and forwards
+            # to localhost:8000 (see ConfigMap reverse_proxy_backend).
+            # Inbound clients hit the Service on 8080 → sidecar → 8000.
+            - name: PORT
+              value: "8000"
+            - name: OLLAMA_URL
+              value: "http://host.docker.internal:11434"
+            - name: OLLAMA_MODEL
+              value: "llama3.2:3b"
+            - name: EMAIL_URL
+              value: "http://ibac-email-server.ibac-demo.svc.cluster.local:8888"
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+
+        # ----- AuthBridge sidecar (proxy-sidecar mode) -----
+        - name: authbridge
+          # NB: this image must contain the IBAC plugin. Until a
+          # release tag ships, build locally from this branch:
+          #   cd ../../.. && podman build \
+          #     -f authbridge/cmd/authbridge-proxy/Dockerfile \
+          #     -t authbridge:demo authbridge/
+          #   kind load docker-image authbridge:demo --name kagenti
+          image: authbridge:demo
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: reverse-proxy
+            - containerPort: 8081
+              name: forward-proxy
+            - containerPort: 9094
+              name: session-api
+          env:
+            # Disable SPIRE — the demo doesn't need workload identity.
+            - name: SPIRE_ENABLED
+              value: "false"
+            - name: LOG_LEVEL
+              value: "INFO"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/authbridge
+              readOnly: true
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+
+      volumes:
+        - name: config
+          configMap:
+            name: ibac-agent-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ibac-agent
+  namespace: ibac-demo
+spec:
+  selector:
+    app.kubernetes.io/name: ibac-agent
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+    - port: 9094
+      targetPort: 9094
+      protocol: TCP
+      name: session-api
+  type: ClusterIP
