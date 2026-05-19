@@ -168,29 +168,81 @@ func execReadFile(args map[string]interface{}) string {
 	return string(data)
 }
 
+// execGetEmails fetches emails by invoking the email-server's MCP
+// `get_emails` tool. Wire shape:
+//
+//	POST $EMAIL_URL/mcp
+//	{"jsonrpc":"2.0","id":"...","method":"tools/call",
+//	 "params":{"name":"get_emails","arguments":{}}}
+//
+// The response carries the email text in result.content[0].text per
+// MCP's tool-call result shape. authbridge's mcp-parser observes this
+// JSON-RPC body on both sides and publishes MCPExtension to pctx,
+// which IBAC reads to enrich its action description (the allow row
+// for this call shows MCP_TOOL: get_emails in show-result and abctl).
 func execGetEmails(_ map[string]interface{}) string {
 	emailURL := os.Getenv("EMAIL_URL")
 	if emailURL == "" {
 		emailURL = "http://localhost:8888"
 	}
-	// Same explicit-proxy client as execHTTPPost — get_emails is also
-	// untrusted outbound (the email body is the attack vector) so it
-	// must flow through authbridge for any future content-based
-	// guardrails to see it.
-	req, err := http.NewRequest(http.MethodGet, emailURL+"/emails", nil)
-	if err != nil {
-		return fmt.Sprintf("error creating request: %v", err)
+	rpc := struct {
+		JSONRPC string         `json:"jsonrpc"`
+		ID      string         `json:"id"`
+		Method  string         `json:"method"`
+		Params  map[string]any `json:"params"`
+	}{
+		JSONRPC: "2.0",
+		ID:      newUUID(),
+		Method:  "tools/call",
+		Params: map[string]any{
+			"name":      "get_emails",
+			"arguments": map[string]any{},
+		},
 	}
+	reqBody, err := json.Marshal(rpc)
+	if err != nil {
+		return fmt.Sprintf("error marshaling MCP request: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, emailURL+"/mcp", bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Sprintf("error creating MCP request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := proxiedClient.Do(req)
 	if err != nil {
-		return fmt.Sprintf("error fetching emails: %v", err)
+		return fmt.Sprintf("error calling MCP get_emails: %v", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Sprintf("error reading email response: %v", err)
+		return fmt.Sprintf("error reading MCP response: %v", err)
 	}
-	return string(body)
+
+	var mcp struct {
+		Result struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &mcp); err != nil {
+		return fmt.Sprintf("error decoding MCP response: %v (body=%.200s)", err, string(body))
+	}
+	if mcp.Error != nil {
+		return fmt.Sprintf("MCP error %d: %s", mcp.Error.Code, mcp.Error.Message)
+	}
+	for _, c := range mcp.Result.Content {
+		if c.Type == "text" && c.Text != "" {
+			return c.Text
+		}
+	}
+	return "MCP response had no text content"
 }
 
 // proxiedClient is the HTTP client used for outbound requests that
