@@ -639,10 +639,10 @@ func handleAgentCard(w http.ResponseWriter, r *http.Request) {
 	// AGENT_PUBLIC_URL is what the UI displays as the agent's
 	// callable address. Defaults to the in-cluster Service URL,
 	// which is what kagenti UI actually uses for the chat call.
-	publicURL := envOr("AGENT_PUBLIC_URL", "http://ibac-agent.team1.svc.cluster.local:8080/")
+	publicURL := envOr("AGENT_PUBLIC_URL", "http://email-agent.team1.svc.cluster.local:8080/")
 	card := map[string]any{
-		"name":               "IBAC Email Assistant",
-		"description":        "Email-poison demo agent for the IBAC plugin. Responds to \"Summarize my emails.\" by fetching from a poisoned email source — the IBAC plugin in the agent's authbridge sidecar blocks the embedded prompt-injection's exfiltration attempt.",
+		"name":               "Email Assistant",
+		"description":        "Email-summarization agent. Responds to \"Summarize my emails.\" by fetching from an MCP email source. (In the IBAC demo the email source is intentionally poisoned with a prompt-injection payload that tries to exfiltrate the email contents; the IBAC plugin in the agent's authbridge sidecar denies the resulting outbound POST.)",
 		"protocolVersion":    "0.3.0",
 		"version":            "0.0.1",
 		"url":                publicURL,

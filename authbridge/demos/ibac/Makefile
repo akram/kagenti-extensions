@@ -30,7 +30,7 @@ help:  ## Show this menu (default)
 	@printf "\nIBAC demo — operator-injected agent in kagenti's team1 namespace.\n\n"
 	@printf "Typical run:\n"
 	@printf "  \033[1mmake build-images build-authbridge load-images demo-ibac\033[0m\n"
-	@printf "  ... chat with ibac-agent in the kagenti UI ...\n"
+	@printf "  ... chat with email-agent in the kagenti UI ...\n"
 	@printf "  \033[1mmake show-result\033[0m\n"
 	@printf "  \033[1mmake undeploy\033[0m\n\n"
 	@printf "Targets:\n"
@@ -40,7 +40,7 @@ help:  ## Show this menu (default)
 	@printf "\nVariables:\n"
 	@printf "  \033[36m%-18s\033[0m %s\n" "KIND_CLUSTER_NAME" "kind cluster to load images into (default: kagenti)"
 	@printf "  \033[36m%-18s\033[0m %s\n" "NAMESPACE"         "agent namespace (default: team1)"
-	@printf "  \033[36m%-18s\033[0m %s\n" "AGENT_NAME"        "deployment name (default: ibac-agent)"
+	@printf "  \033[36m%-18s\033[0m %s\n" "AGENT_NAME"        "deployment name (default: email-agent)"
 	@printf "  \033[36m%-18s\033[0m %s\n" "AUTHBRIDGE_TAG"    "image tag override; auto-detected from a running pod"
 	@printf "  \033[36m%-18s\033[0m %s\n" "CONTAINER_RUNTIME" "podman or docker (auto-detected)"
 	@printf "\nPrerequisites: kagenti install on a kind cluster, ollama on the host\n"
@@ -49,13 +49,13 @@ help:  ## Show this menu (default)
 KIND_CLUSTER_NAME ?= kagenti
 KIND_NODE         ?= $(KIND_CLUSTER_NAME)-control-plane
 NAMESPACE         ?= team1
-AGENT_NAME        ?= ibac-agent
+AGENT_NAME        ?= email-agent
 
 # Container runtime auto-detect.
 CONTAINER_RUNTIME ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 
 # Demo-image tags (local-only, not pushed).
-AGENT_IMAGE       := ibac-agent:latest
+AGENT_IMAGE       := email-agent:latest
 EMAIL_IMAGE       := ibac-email-server:latest
 EVIL_IMAGE        := ibac-evil-server:latest
 
@@ -143,7 +143,7 @@ deploy:  ## Apply manifests + force rollout (sub-step of demo-ibac)
 	@# but the manifest didn't (image tag is :latest). We rollout-
 	@# restart unconditionally; idempotent on the first run since
 	@# Available + Available == still Available.
-	kubectl -n $(NAMESPACE) rollout restart deploy/ibac-email-server deploy/ibac-evil-server deploy/ibac-agent
+	kubectl -n $(NAMESPACE) rollout restart deploy/ibac-email-server deploy/ibac-evil-server deploy/email-agent
 	$(MAKE) wait-pods
 
 wait-pods:  ## Wait for pods + operator-rendered authbridge ConfigMap

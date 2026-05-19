@@ -15,7 +15,7 @@
 set -uo pipefail
 
 NAMESPACE=${1:-team1}
-AGENT_NAME=${2:-ibac-agent}
+AGENT_NAME=${2:-email-agent}
 ABCTL_BIN=${ABCTL_BIN:-/tmp/abctl-ibac-demo}
 
 # 1. The Makefile's build-abctl target builds the binary on demand.

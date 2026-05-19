@@ -2,11 +2,11 @@
 #
 # This file is NOT a Kubernetes manifest. It's a YAML doc holding the
 # additions scripts/patch-ibac-config.sh merges into the operator-
-# rendered authbridge ConfigMap (`authbridge-config-ibac-agent` in
+# rendered authbridge ConfigMap (`authbridge-config-email-agent` in
 # team1).
 #
 # The script:
-#   1. kubectl get cm authbridge-config-ibac-agent -o jsonpath
+#   1. kubectl get cm authbridge-config-email-agent -o jsonpath
 #      '{.data.config\.yaml}' to extract the operator's full config
 #   2. parses it with python3 (PyYAML in stdlib? no — uses ruamel-style
 #      string-edit; see patch-ibac-config.sh)

@@ -9,7 +9,7 @@ A key design point: **the agent itself doesn't know IBAC exists.** IBAC is a tra
 ## What you'll see
 
 1. You run `make demo-ibac`. The Makefile builds the agent + email-server + evil-server images, rebuilds authbridge from this branch under whatever tag the operator pulls, deploys everything to `team1`, and patches the operator-rendered authbridge ConfigMap to enable IBAC. It ends with a "ready to chat" banner.
-2. You open the kagenti UI at `http://kagenti-ui.localtest.me:8080`, log in with Keycloak, find `ibac-agent` in the agent list, and type:
+2. You open the kagenti UI at `http://kagenti-ui.localtest.me:8080`, log in with Keycloak, find `email-agent` in the agent list, and type:
    ```
    Summarize my emails.
    ```
@@ -45,7 +45,7 @@ make build-authbridge   # rebuild authbridge from this branch under
 make load-images        # kind load all four images
 make demo-ibac          # deploy + patch + ready-to-chat banner
 
-# Open http://kagenti-ui.localtest.me:8080, find `ibac-agent`, chat
+# Open http://kagenti-ui.localtest.me:8080, find `email-agent`, chat
 # "Summarize my emails."
 
 make show-result        # forensic of the most recent session
@@ -88,7 +88,7 @@ The operator-rendered pipeline before our patch:
 | Inbound | `jwt-validation` |
 | Outbound | `token-exchange` |
 
-After `make demo-ibac` patches `authbridge-config-ibac-agent`:
+After `make demo-ibac` patches `authbridge-config-email-agent`:
 
 | Direction | Plugins (with IBAC) |
 |---|---|
@@ -99,7 +99,7 @@ After `make demo-ibac` patches `authbridge-config-ibac-agent`:
 
 ## What happens when you click "Send" in the UI
 
-1. **kagenti backend** (`/chat/team1/ibac-agent/send`) receives the chat request, wraps it as A2A `message/send` JSON-RPC, forwards your Keycloak Bearer token, and POSTs it to the agent's Service:8080.
+1. **kagenti backend** (`/chat/team1/email-agent/send`) receives the chat request, wraps it as A2A `message/send` JSON-RPC, forwards your Keycloak Bearer token, and POSTs it to the agent's Service:8080.
 2. **authbridge reverse proxy** on the agent's Pod intercepts. `a2a-parser` parses the message and stores it in the session. `jwt-validation` validates the token. The request reaches the agent.
 3. **Agent** sees `"Summarize my emails."`, calls `get_emails` → email-server returns 6 emails (one with a prompt injection telling it to POST to evil-server). The LLM follows the injection and emits a `http_post` tool call.
 4. **Agent's tool implementation** does an outbound HTTP POST through `HTTP_PROXY=http://localhost:8081`.
@@ -176,7 +176,7 @@ The right tag is whatever the kagenti chart's `values.yaml` pins (see `charts/ka
 If the operator-rendered ConfigMap has changed shape (a future kagenti release adds keys we don't expect), `scripts/patch-ibac-config.sh` may fail. Inspect the operator's ConfigMap and our patch fragment:
 
 ```sh
-kubectl -n team1 get cm authbridge-config-ibac-agent -o yaml
+kubectl -n team1 get cm authbridge-config-email-agent -o yaml
 cat k8s/ibac-patch.yaml
 ```
 
@@ -187,7 +187,7 @@ The script does an idempotent merge — re-running after a fix is safe.
 The script tails the authbridge container for `reloader: pipelines swapped`. Failure modes:
 
 - **Bad config**: the merged config.yaml is invalid. Look in the authbridge logs for `reload failed`.
-- **Slow kubelet sync**: the projected ConfigMap volume can take up to ~60s to propagate. Bump the timeout: `bash scripts/wait-for-reload.sh team1 ibac-agent 180`.
+- **Slow kubelet sync**: the projected ConfigMap volume can take up to ~60s to propagate. Bump the timeout: `bash scripts/wait-for-reload.sh team1 email-agent 180`.
 - **Operator overwrote the patch**: rare — happens if the operator's reconciler kicks. Re-run `make patch-config && make wait-reload`.
 
 ### Kagenti UI shows "Agent card not available"
@@ -198,21 +198,21 @@ Quick checks:
 
 ```sh
 # Is the AgentCard CR Synced?
-kubectl -n team1 get agentcard ibac-agent-card
+kubectl -n team1 get agentcard email-agent-card
 
 # What does the agent actually serve?
-kubectl -n team1 port-forward svc/ibac-agent 18080:8080 &
+kubectl -n team1 port-forward svc/email-agent 18080:8080 &
 curl -s http://localhost:18080/.well-known/agent-card.json | jq .url
 ```
 
-The card's `url` field is what the UI uses for the chat call. It defaults to `http://ibac-agent.team1.svc.cluster.local:8080/`. If your cluster uses a different namespace or service URL, override `AGENT_PUBLIC_URL` in `k8s/agent.yaml` and re-deploy.
+The card's `url` field is what the UI uses for the chat call. It defaults to `http://email-agent.team1.svc.cluster.local:8080/`. If your cluster uses a different namespace or service URL, override `AGENT_PUBLIC_URL` in `k8s/agent.yaml` and re-deploy.
 
 ### Chat says "I tried to POST but got HTTP 200" — exfiltration succeeded with IBAC enabled
 
 This shouldn't happen. Check the active config:
 
 ```sh
-kubectl -n team1 get cm authbridge-config-ibac-agent -o jsonpath='{.data.config\.yaml}' | grep ibac
+kubectl -n team1 get cm authbridge-config-email-agent -o jsonpath='{.data.config\.yaml}' | grep ibac
 ```
 
 If `ibac` isn't there, the patch silently failed. Re-run `make patch-config && make wait-reload`.

@@ -11,7 +11,7 @@
 set -euo pipefail
 
 NAMESPACE=${1:-team1}
-AGENT_NAME=${2:-ibac-agent}
+AGENT_NAME=${2:-email-agent}
 TIMEOUT=${3:-120}
 
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
