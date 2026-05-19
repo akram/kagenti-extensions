@@ -155,6 +155,17 @@ Three exit codes (so CI can react):
 | 1 | `IBAC FAILED` — evil-server received exfil despite IBAC. Real bug. |
 | 2 | `ATTACK MISFIRED` — no IBAC fire AND no exfil. The LLM didn't follow the injection (small-LLM non-determinism). Re-chat in the UI and re-run. |
 
+## Customizing the judge's system prompt
+
+The IBAC plugin ships with a generic security-policy-judge prompt (`defaultSystemPrompt` in `authbridge/authlib/plugins/ibac/judge.go`) that asks the model to compare intent vs action and emit `{"verdict": ..., "reason": ...}` JSON. It's deliberately conservative — "when in doubt, deny."
+
+To override it for your domain, set `system_prompt` in the IBAC plugin's `config:` block (see the commented example in `k8s/ibac-patch.yaml`). The prompt MUST still instruct the model to emit the same JSON shape — anything else routes through `ibac.judge_uncertain` (a fail-closed deny).
+
+Example use cases for an override:
+- A finance-compliance flavor that explicitly checks for "moves funds / changes account ownership / leaks PII outside the firm."
+- A more permissive prompt for a development environment (e.g. `"verdict: allow unless action is clearly destructive"`).
+- A few-shot prompt with concrete examples of allow / deny decisions in your domain.
+
 ## Troubleshooting
 
 ### `make demo-ibac` aborts with "kagenti-system not found"
