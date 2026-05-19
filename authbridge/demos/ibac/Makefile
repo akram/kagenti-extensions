@@ -18,9 +18,33 @@
 #   - ollama on the host with llama3.2:3b pulled
 #   - kubectl, kind, podman/docker, python3 + PyYAML
 
-.PHONY: build-images build-authbridge load-images deploy patch-config \
+.PHONY: help build-images build-authbridge load-images deploy patch-config \
         wait-reload demo-ibac show-result undeploy logs-agent logs-evil \
         preflight wait-pods
+
+# `make` with no target prints help — easier discoverability than the
+# walls-of-comments at the top.
+.DEFAULT_GOAL := help
+
+help:  ## Show this menu (default)
+	@printf "\nIBAC demo — operator-injected agent in kagenti's team1 namespace.\n\n"
+	@printf "Typical run:\n"
+	@printf "  \033[1mmake build-images build-authbridge load-images demo-ibac\033[0m\n"
+	@printf "  ... chat with ibac-agent in the kagenti UI ...\n"
+	@printf "  \033[1mmake show-result\033[0m\n"
+	@printf "  \033[1mmake undeploy\033[0m\n\n"
+	@printf "Targets:\n"
+	@awk 'BEGIN { FS = ":.*## " } \
+	     /^[a-zA-Z_-]+:.*## / { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' \
+	     $(MAKEFILE_LIST)
+	@printf "\nVariables:\n"
+	@printf "  \033[36m%-18s\033[0m %s\n" "KIND_CLUSTER_NAME" "kind cluster to load images into (default: kagenti)"
+	@printf "  \033[36m%-18s\033[0m %s\n" "NAMESPACE"         "agent namespace (default: team1)"
+	@printf "  \033[36m%-18s\033[0m %s\n" "AGENT_NAME"        "deployment name (default: ibac-agent)"
+	@printf "  \033[36m%-18s\033[0m %s\n" "AUTHBRIDGE_TAG"    "image tag override; auto-detected from a running pod"
+	@printf "  \033[36m%-18s\033[0m %s\n" "CONTAINER_RUNTIME" "podman or docker (auto-detected)"
+	@printf "\nPrerequisites: kagenti install on a kind cluster, ollama on the host\n"
+	@printf "with llama3.2:3b, kubectl/kind/podman, python3 + PyYAML.\n\n"
 
 KIND_CLUSTER_NAME ?= kagenti
 KIND_NODE         ?= $(KIND_CLUSTER_NAME)-control-plane
@@ -51,7 +75,8 @@ AUTHBRIDGE_IMAGE := ghcr.io/kagenti/kagenti-extensions/authbridge:$(AUTHBRIDGE_T
 
 # ---------- Pre-flight ----------
 
-preflight:
+preflight:  ## Verify kagenti is installed + tools are available
+
 	@kubectl get ns kagenti-system >/dev/null 2>&1 || { \
 	  echo "ERROR: namespace 'kagenti-system' not found — kagenti doesn't appear to be installed."; \
 	  echo "       Install kagenti first (see https://github.com/kagenti/kagenti/blob/main/docs/install.md)"; \
@@ -71,12 +96,12 @@ preflight:
 
 # ---------- Build ----------
 
-build-images:
+build-images:  ## Build agent + email-server + evil-server images
 	$(CONTAINER_RUNTIME) build -f agent/Dockerfile        -t $(AGENT_IMAGE) .
 	$(CONTAINER_RUNTIME) build -f email-server/Dockerfile -t $(EMAIL_IMAGE) .
 	$(CONTAINER_RUNTIME) build -f evil-server/Dockerfile  -t $(EVIL_IMAGE)  .
 
-build-authbridge:
+build-authbridge:  ## Rebuild authbridge from this branch under operator-pinned tag
 	@# Fail loudly if invoked from outside authbridge/demos/ibac/.
 	@test -f ../../cmd/authbridge-proxy/Dockerfile || { \
 	  echo "build-authbridge must be run from authbridge/demos/ibac/"; \
@@ -87,7 +112,8 @@ build-authbridge:
 	cd ../.. && $(CONTAINER_RUNTIME) build \
 	  -f cmd/authbridge-proxy/Dockerfile -t $(AUTHBRIDGE_IMAGE) .
 
-load-images:
+load-images:  ## Load all four images into the kind cluster
+
 	kind load docker-image $(AGENT_IMAGE)      --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(EMAIL_IMAGE)      --name $(KIND_CLUSTER_NAME)
 	kind load docker-image $(EVIL_IMAGE)       --name $(KIND_CLUSTER_NAME)
@@ -100,7 +126,7 @@ endif
 
 # ---------- Deploy + patch ----------
 
-deploy:
+deploy:  ## Apply manifests + force rollout (sub-step of demo-ibac)
 	kubectl apply -f k8s/email-server.yaml
 	kubectl apply -f k8s/evil-server.yaml
 	kubectl apply -f k8s/agent.yaml
@@ -112,7 +138,7 @@ deploy:
 	kubectl -n $(NAMESPACE) rollout restart deploy/ibac-email-server deploy/ibac-evil-server deploy/ibac-agent
 	$(MAKE) wait-pods
 
-wait-pods:
+wait-pods:  ## Wait for pods + operator-rendered authbridge ConfigMap
 	@echo "[*] Waiting for ibac-email-server and ibac-evil-server ..."
 	kubectl -n $(NAMESPACE) wait --for=condition=Available --timeout=120s \
 	  deploy/ibac-email-server deploy/ibac-evil-server
@@ -131,15 +157,15 @@ wait-pods:
 	  exit 1; \
 	}
 
-patch-config:
+patch-config:  ## Add a2a-parser + ibac to the rendered authbridge ConfigMap
 	bash scripts/patch-ibac-config.sh $(NAMESPACE) $(AGENT_NAME)
 
-wait-reload:
+wait-reload:  ## Wait for the sidecar's hot-reload to pick up the patched config
 	bash scripts/wait-for-reload.sh $(NAMESPACE) $(AGENT_NAME) 120
 
 # ---------- Top-level demo + result rendering ----------
 
-demo-ibac: preflight deploy patch-config wait-reload
+demo-ibac: preflight deploy patch-config wait-reload  ## Deploy the demo end-to-end and print next-steps banner
 	@echo
 	@echo "╔══════════════════════════════════════════════════════════╗"
 	@echo "║ ✅ IBAC demo agent ready in $(NAMESPACE)                          ║"
@@ -163,12 +189,12 @@ demo-ibac: preflight deploy patch-config wait-reload
 	@echo "║ to see the pipeline-level forensic.                      ║"
 	@echo "╚══════════════════════════════════════════════════════════╝"
 
-show-result:
+show-result:  ## Render pipeline forensic for the most recent chat session
 	bash scripts/show-result.sh $(NAMESPACE) $(AGENT_NAME)
 
 # ---------- Cleanup ----------
 
-undeploy:
+undeploy:  ## Remove demo resources from team1 (kagenti install untouched)
 	-kubectl -n $(NAMESPACE) delete -f k8s/agent.yaml --ignore-not-found
 	-kubectl -n $(NAMESPACE) delete -f k8s/email-server.yaml --ignore-not-found
 	-kubectl -n $(NAMESPACE) delete -f k8s/evil-server.yaml --ignore-not-found
@@ -179,11 +205,11 @@ undeploy:
 
 # ---------- Diagnostics ----------
 
-logs-agent:
+logs-agent:  ## Tail agent + authbridge sidecar logs
 	@echo "--- agent ---"
 	kubectl -n $(NAMESPACE) logs deploy/$(AGENT_NAME) -c agent --tail=100
 	@echo "--- authbridge ---"
 	kubectl -n $(NAMESPACE) logs deploy/$(AGENT_NAME) -c authbridge-proxy --tail=100
 
-logs-evil:
+logs-evil:  ## Tail evil-server logs (empty when IBAC is working)
 	kubectl -n $(NAMESPACE) logs deploy/ibac-evil-server --tail=50
