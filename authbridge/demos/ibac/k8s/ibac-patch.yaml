@@ -27,13 +27,17 @@ inbound_prepend:
     # message when IBAC runs on the outbound side.
 
 outbound_append:
-  - name: mcp-parser
-    # Optional enrichment: when the agent's outbound is an MCP
-    # tools/call, this populates pctx.Extensions.MCP so IBAC's action
-    # description includes tool name + args. The IBAC demo agent's
-    # http_post tool emits raw HTTP (not MCP), so this parser doesn't
-    # fire — but adding it makes the pipeline correct for any
-    # MCP-shaped agents that copy this demo's pattern.
+  - name: inference-parser
+    # Surfaces the agent's outbound LLM calls (POST /v1/chat/completions
+    # to ollama in this demo) in the session-event timeline. Each call
+    # shows up in abctl with the model name and prompt summary, which
+    # makes the timeline informative for operators watching what the
+    # agent is doing. mcp-parser was here in an earlier draft but
+    # never fired — this demo's agent uses local Go function-call
+    # tools, not MCP servers, so there's no MCP-shaped outbound for
+    # mcp-parser to match. Pick the parser that matches the
+    # agent's actual traffic shape; for an MCP-tool-using agent
+    # you'd swap inference-parser for mcp-parser here.
   - name: ibac
     config:
       # Judge LLM. host.docker.internal:11434 works on Docker Desktop
