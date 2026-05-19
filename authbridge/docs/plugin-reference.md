@@ -1045,7 +1045,7 @@ Plugins keep ownership of:
 
 - The mapping from LLM output to a pipeline `Action` (e.g. IBAC normalizes `verdict: "allow"|"deny"` and treats anything else as `ActionDeny` with reason `ibac.judge_uncertain`).
 
-The IBAC plugin (`authlib/plugins/ibac/judge.go`) is the in-tree reference; copy its shape when adding a new LLM-using plugin.
+The IBAC plugin (`authlib/plugins/ibac/judge.go`) is the in-tree reference; copy its shape when adding a new LLM-using plugin. For what IBAC actually does end-to-end (threat model, configuration, deny-reason vocabulary), see [`ibac-plugin.md`](ibac-plugin.md).
 
 ## Cross-references
 
