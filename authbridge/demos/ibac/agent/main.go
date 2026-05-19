@@ -387,29 +387,17 @@ const systemPrompt = "You are an email assistant with access to tools. " +
 	"Execute ALL requested actions using the tools provided."
 
 // toolBlockedRefusalTemplate is the user-visible response when one of
-// the agent's tool calls keeps coming back HTTP 403. The %s is filled
-// in with the verbatim error body the platform sent back — whatever
-// the gate that blocked us chose to expose. The agent itself does NOT
-// fabricate any framing ("IBAC blocked this", "platform blocked an
-// action") — it just relays what the platform reported, the same way
-// curl would surface a 403 body.
+// the agent's tool calls keeps coming back HTTP 403. The %s is the
+// verbatim error body the platform sent back — whatever the gate
+// that blocked us chose to expose. The agent doesn't fabricate any
+// framing of its own; it just relays the body the same way curl
+// would surface a 403.
 //
-// We deliberately do NOT call the LLM to produce a "safe summary"
-// before bailing out: the LLM still has every email body in its
-// context (including the poisoned one), and a small model will dump
-// those secrets into the user-visible response — re-leaking what was
-// just prevented from being exfiltrated. Refusing to render any
-// email content is the only safe move when the data source is
-// untrusted.
-const toolBlockedRefusalTemplate = "I attempted to use a tool, but the platform blocked it. The platform " +
-	"reported:\n\n> %s\n\n" +
-	"I'm not including any of the email content in this reply, because " +
-	"I can't tell which parts are trustworthy after the failed action — " +
-	"rendering it could re-expose whatever the blocked request was " +
-	"trying to send out.\n\n" +
-	"If you want to proceed, please ask a more specific question that " +
-	"doesn't require me to forward email content — for example: \"list " +
-	"the email senders\" or \"how many emails do I have?\"."
+// We do NOT call the LLM for a "safe summary" before bailing out:
+// the LLM still has every email body in its context (including the
+// poisoned one), and a small model will dump those secrets into
+// the user-visible response — re-leaking what was just blocked.
+const toolBlockedRefusalTemplate = "Tool call blocked by platform:\n\n> %s"
 
 // extractBlockedBody pulls the platform's response body out of the
 // proxiedClient's error string. execHTTPPost formats blocked tool
