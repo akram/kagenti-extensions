@@ -16,7 +16,17 @@ Built-in plugins and the open plugin registry. Plugin authoring docs live under
 | `a2a-parser` | Parse Agent-to-Agent JSON-RPC traffic into `Extensions.A2A` |
 | `mcp-parser` | Parse Model Context Protocol traffic into `Extensions.MCP` |
 | `inference-parser` | Parse OpenAI-style / Ollama inference traffic into `Extensions.Inference` |
-| `ibac` | Outbound Intent-Based Access Control: LLM judge denies outbound HTTP that doesn't align with the user's most recent intent. Catches prompt-injection / data-exfiltration attempts |
+| [`ibac`](../../docs/ibac-plugin.md) | Outbound Intent-Based Access Control: LLM judge denies outbound HTTP that doesn't align with the user's most recent intent. Catches prompt-injection / data-exfiltration attempts |
+
+## Reusable building blocks for plugin authors
+
+Cross-cutting helpers live as top-level packages in `authlib/` so plugins can share them without growing a dependency on each other:
+
+| Package | Use |
+|---|---|
+| [`authlib/llmclient`](../llmclient/) | OpenAI-compatible chat-completions client with JSON-from-prose extraction. Use when a plugin needs an LLM in the loop (policy judges, content scorers, intent matchers). The IBAC plugin's `judge.go` is the in-tree reference consumer. |
+| [`authlib/bypass`](../bypass/) | Path / host pattern matchers for skip-list configuration. |
+| [`authlib/routing`](../routing/) | Host-to-target route resolver. |
 
 ## Registry
 

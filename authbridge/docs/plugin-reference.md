@@ -1022,6 +1022,31 @@ func TestMyScenario(t *testing.T) {
 never call it. It exists to keep tests isolated from each other under
 `-parallel`.
 
+## Plugins making outbound LLM calls
+
+Plugins that need an LLM in the loop — policy judges, content scorers, intent matchers, audit categorizers — should use [`authlib/llmclient`](../authlib/llmclient/) rather than rolling their own HTTP / JSON / error-handling layer.
+
+What `llmclient` gives you:
+
+- An OpenAI-compatible chat-completions client (`Client.Call`, `Client.CallRaw`).
+- Generic JSON-from-prose extraction (`ExtractJSON[T]`, `CallStructured[T]`) that handles models which wrap JSON in code fences or prose.
+- A two-bucket error model that maps cleanly to `403` (LLM responded but unparseable — wraps `ErrUncertain`) vs `503` (LLM unreachable — does not wrap `ErrUncertain`).
+- A reentrancy sentinel (`Options.SentinelHeaderName`) for breaking loops when the LLM call would otherwise pass back through the plugin's own pipeline.
+
+Plugins keep ownership of:
+
+- The system prompt (operator-overridable; default in the plugin source).
+- The response schema (a Go struct passed as `T` to `CallStructured[T]`).
+- Plugin-named error sentinels that wrap `llmclient.ErrUncertain` so `errors.Is` works at both layers:
+
+  ```go
+  var ErrJudgeUncertain = fmt.Errorf("%w: judge produced bad output", llmclient.ErrUncertain)
+  ```
+
+- The mapping from LLM output to a pipeline `Action` (e.g. IBAC normalizes `verdict: "allow"|"deny"` and treats anything else as `ActionDeny` with reason `ibac.judge_uncertain`).
+
+The IBAC plugin (`authlib/plugins/ibac/judge.go`) is the in-tree reference; copy its shape when adding a new LLM-using plugin. For what IBAC actually does end-to-end (threat model, configuration, deny-reason vocabulary), see [`ibac-plugin.md`](ibac-plugin.md).
+
 ## Cross-references
 
 - `authbridge/authlib/pipeline/configurable.go` — the interface.
@@ -1035,3 +1060,6 @@ never call it. It exists to keep tests isolated from each other under
   convention.
 - `authbridge/authlib/pipeline/session.go` — `SessionEvent` wire shape
   and the `SessionDenied` phase.
+- `authbridge/authlib/llmclient/` — chat-completions helper for
+  plugins that call an LLM (see "Plugins making outbound LLM calls"
+  above).

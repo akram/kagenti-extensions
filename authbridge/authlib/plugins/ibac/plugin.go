@@ -279,7 +279,7 @@ func (p *IBAC) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.A
 	//    up to 2 KB of upstream response on 5xx — full body in slog
 	//    is wasteful and noisy.
 	if err != nil {
-		errPreview := truncate(err.Error(), 240)
+		errPreview := preview(err.Error(), 240)
 		if errors.Is(err, ErrJudgeUncertain) {
 			pctx.Record(pipeline.Invocation{
 				Action: pipeline.ActionDeny,

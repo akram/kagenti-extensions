@@ -1,6 +1,8 @@
 # IBAC demo — Intent-Based Access Control via the kagenti UI
 
-This demo exercises the `ibac` plugin against the same threat shape as the original [huang195/ibac](https://github.com/huang195/ibac) repo: an email-summarization agent receives a prompt-injection inside one of its emails and is tricked into POSTing data to an external server. With IBAC in the agent's outbound authbridge pipeline, the LLM judge denies the misaligned action and the exfiltration is blocked.
+> For the conceptual overview — what IBAC is, the threat model, configuration reference, and operator deployment guidance — see [`authbridge/docs/ibac-plugin.md`](../../docs/ibac-plugin.md). This README is the hands-on walkthrough.
+
+This demo exercises the `ibac` plugin against the prompt-injection / email-poison threat shape: an email-summarization agent receives a prompt-injection inside one of its emails and is tricked into POSTing data to an external server. With IBAC in the agent's outbound authbridge pipeline, the LLM judge denies the misaligned action and the exfiltration is blocked.
 
 The demo runs **inside a kagenti install** — the agent is operator-injected, registered in Keycloak, discoverable in the kagenti UI's agent list, and chatted with through the UI's chat box.
 
