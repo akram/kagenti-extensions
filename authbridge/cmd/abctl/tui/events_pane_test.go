@@ -413,40 +413,39 @@ func TestIsSkipRow(t *testing.T) {
 	}
 }
 
-// TestComputeSpanGlyphs covers the tree-glyph assignment for the PHASE
-// column. Glyphs anchor a (request, response) pair visually so an
-// operator can trace the span even when other rows interleave.
+// TestComputeSpanGlyphs covers per-row tree-glyph assignment for the
+// PHASE column. Up to two levels of (req, resp) span nesting are
+// surfaced — the largest containing span as outer, the next-largest
+// as inner, deeper levels dropped.
 func TestComputeSpanGlyphs(t *testing.T) {
+	none := spanLevels{}
+	outer := func(g spanGlyph) spanLevels { return spanLevels{outer: g} }
+	both := func(o, i spanGlyph) spanLevels { return spanLevels{outer: o, inner: i} }
+
 	cases := []struct {
 		name  string
 		pairs map[int]int
 		n     int
-		want  []spanGlyph
+		want  []spanLevels
 	}{
 		{
 			name:  "no pairs",
 			pairs: nil,
 			n:     3,
-			want:  []spanGlyph{glyphNone, glyphNone, glyphNone},
+			want:  []spanLevels{none, none, none},
 		},
 		{
 			name: "adjacent pair (req at 0, resp at 1)",
 			// Bidirectional, like pairInvocationRows emits.
 			pairs: map[int]int{0: 1, 1: 0},
 			n:     2,
-			want:  []spanGlyph{glyphStart, glyphEnd},
+			want:  []spanLevels{outer(glyphStart), outer(glyphEnd)},
 		},
 		{
 			name:  "pair with one row in between",
 			pairs: map[int]int{0: 2, 2: 0},
 			n:     3,
-			want:  []spanGlyph{glyphStart, glyphMiddle, glyphEnd},
-		},
-		{
-			name:  "pair spanning four rows",
-			pairs: map[int]int{0: 3, 3: 0},
-			n:     4,
-			want:  []spanGlyph{glyphStart, glyphMiddle, glyphMiddle, glyphEnd},
+			want:  []spanLevels{outer(glyphStart), outer(glyphMiddle), outer(glyphEnd)},
 		},
 		{
 			name: "two non-overlapping pairs",
@@ -454,36 +453,85 @@ func TestComputeSpanGlyphs(t *testing.T) {
 				0: 2, 2: 0,
 				3: 5, 5: 3,
 			},
-			n:    6,
-			want: []spanGlyph{glyphStart, glyphMiddle, glyphEnd, glyphStart, glyphMiddle, glyphEnd},
+			n: 6,
+			want: []spanLevels{
+				outer(glyphStart), outer(glyphMiddle), outer(glyphEnd),
+				outer(glyphStart), outer(glyphMiddle), outer(glyphEnd),
+			},
 		},
 		{
 			name: "nested pairs — outer (0,5), inner (2,3)",
-			// Inner pair's endpoints overwrite outer's middle. Operators
-			// see two distinct corners in the gap.
+			// Both levels are now visible: the outer's continuation
+			// glyph sits next to the inner's corner so an operator can
+			// see "row 2 is inside an outer span AND opens an inner
+			// span" at a glance.
 			pairs: map[int]int{
 				0: 5, 5: 0,
 				2: 3, 3: 2,
 			},
 			n: 6,
-			want: []spanGlyph{
-				glyphStart,  // 0: outer start
-				glyphMiddle, // 1: inside outer
-				glyphStart,  // 2: inner start (overwrites outer middle)
-				glyphEnd,    // 3: inner end (overwrites outer middle)
-				glyphMiddle, // 4: still inside outer
-				glyphEnd,    // 5: outer end
+			want: []spanLevels{
+				outer(glyphStart),             // 0: outer starts here
+				outer(glyphMiddle),            // 1: only outer participates
+				both(glyphMiddle, glyphStart), // 2: outer continues, inner starts
+				both(glyphMiddle, glyphEnd),   // 3: outer continues, inner ends
+				outer(glyphMiddle),            // 4: only outer participates
+				outer(glyphEnd),               // 5: outer ends here
+			},
+		},
+		{
+			name: "real-world shape — long outer pair with inner pairs interleaved",
+			// Mirrors the IBAC demo timeline:
+			//   row 0: a2a-parser req     ┌
+			//   row 1: jwt-validation     │            (event-1 continuation)
+			//   row 2: inference-parser req  ┌
+			//   row 3: inference-parser resp └
+			//   row 4: a2a-parser resp    └
+			pairs: map[int]int{
+				0: 4, 4: 0, // outer a2a-parser
+				2: 3, 3: 2, // inner inference-parser
+			},
+			n: 5,
+			want: []spanLevels{
+				outer(glyphStart),
+				outer(glyphMiddle),
+				both(glyphMiddle, glyphStart),
+				both(glyphMiddle, glyphEnd),
+				outer(glyphEnd),
+			},
+		},
+		{
+			name: "deeper nesting collapses to two levels",
+			// outer (0, 7), middle (1, 6), innermost (2, 5). Row 3 sits
+			// inside all three; only the two largest surface so the
+			// PHASE column doesn't blow its width budget.
+			pairs: map[int]int{
+				0: 7, 7: 0,
+				1: 6, 6: 1,
+				2: 5, 5: 2,
+			},
+			n: 8,
+			want: []spanLevels{
+				outer(glyphStart),
+				both(glyphMiddle, glyphStart),  // outer middle + middle-pair start
+				both(glyphMiddle, glyphMiddle), // middle-pair middle wins over innermost (deeper dropped)
+				both(glyphMiddle, glyphMiddle), // same
+				both(glyphMiddle, glyphMiddle), // same
+				both(glyphMiddle, glyphMiddle), // middle-pair middle (innermost dropped)
+				both(glyphMiddle, glyphEnd),    // middle-pair ends here, outer continues
+				outer(glyphEnd),
 			},
 		},
 		{
 			name: "out-of-bounds endpoint gracefully ignored",
 			// Defensive: pairInvocationRows shouldn't emit pairs with
-			// indices >= n, but the helper must not panic if it ever
-			// happens (e.g. a future caller reusing the helper on a
-			// truncated row slice).
+			// indices >= n, but the helper must not panic if a future
+			// caller reuses it on a truncated row slice. The span (0,10)
+			// is still treated as containing rows 1 and 2 because they
+			// satisfy a < i < b.
 			pairs: map[int]int{0: 10, 10: 0},
 			n:     3,
-			want:  []spanGlyph{glyphStart, glyphMiddle, glyphMiddle},
+			want:  []spanLevels{outer(glyphStart), outer(glyphMiddle), outer(glyphMiddle)},
 		},
 	}
 	for _, tc := range cases {
@@ -494,10 +542,36 @@ func TestComputeSpanGlyphs(t *testing.T) {
 			}
 			for i := range tc.want {
 				if got[i] != tc.want[i] {
-					t.Errorf("row %d: got %q (%d), want %q (%d)",
-						i, string(rune(got[i])), got[i],
-						string(rune(tc.want[i])), tc.want[i])
+					t.Errorf("row %d: got {outer=%q inner=%q}, want {outer=%q inner=%q}",
+						i,
+						string(rune(got[i].outer)), string(rune(got[i].inner)),
+						string(rune(tc.want[i].outer)), string(rune(tc.want[i].inner)))
 				}
+			}
+		})
+	}
+}
+
+// TestSpanLevels_Prefix locks the rendered prefix the rebuildEventsTable
+// uses to populate the PHASE column. Empty levels render as empty
+// string; one level renders one glyph; two levels render two glyphs.
+func TestSpanLevels_Prefix(t *testing.T) {
+	cases := []struct {
+		name string
+		s    spanLevels
+		want string
+	}{
+		{"none", spanLevels{}, ""},
+		{"outer only — start", spanLevels{outer: glyphStart}, "┌"},
+		{"outer only — middle", spanLevels{outer: glyphMiddle}, "│"},
+		{"outer only — end", spanLevels{outer: glyphEnd}, "└"},
+		{"both levels — outer middle, inner start", spanLevels{outer: glyphMiddle, inner: glyphStart}, "│┌"},
+		{"both levels — outer middle, inner end", spanLevels{outer: glyphMiddle, inner: glyphEnd}, "│└"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.s.prefix(); got != tc.want {
+				t.Errorf("prefix() = %q, want %q", got, tc.want)
 			}
 		})
 	}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -109,30 +110,28 @@ func (m *model) rebuildEventsTable() {
 		continuation := lastEvent == rs.event
 
 		var idCell, timeCell, dirCell, phaseCell, statusC, durCell, tokC, hostC string
+		// Up to two levels of (req, resp) span nesting are surfaced as
+		// box-drawing prefixes in PHASE so operators can trace pairs
+		// even when other rows interleave. Width fits the 6-char PHASE
+		// budget: outer (1) + inner (1) + base phase ("resp"/"deny" =
+		// 4) → 6 max.
+		prefix := spanGlyphs[i].prefix()
 		if !continuation {
 			if id, ok := eventIDs[rs.event]; ok {
 				idCell = strconv.Itoa(id)
 			}
 			timeCell = rs.event.At.Format("15:04:05.00")
 			dirCell = shortDirection(rs.event.Direction)
-			phaseCell = shortPhase(rs.event.Phase)
-			// Tree-glyph prefix (┌ / │ / └) when this row sits at a
-			// pair endpoint or inside a pair span. The 6-char PHASE
-			// width budget accommodates the prefix plus the longest
-			// base phase ("resp"/"deny" → 5 chars total).
-			if g := spanGlyphs[i]; g != glyphNone {
-				phaseCell = string(rune(g)) + phaseCell
-			}
+			phaseCell = prefix + shortPhase(rs.event.Phase)
 			statusC = statusCell(*rs.event)
 			durCell = durationCell(*rs.event)
 			tokC = tokensCell(*rs.event)
 			hostC = truncStr(rs.event.Host, 20)
-		} else if g := spanGlyphs[i]; g == glyphMiddle {
-			// Continuation row inside a pair span: render the vertical
-			// connector even though the rest of the event-level columns
-			// stay blank, so the operator's eye can follow the pair
-			// across multi-invocation events.
-			phaseCell = string(rune(g))
+		} else if prefix != "" {
+			// Continuation row inside a pair span: render only the
+			// connectors (no base phase text) so the operator's eye
+			// can follow the pair across multi-invocation events.
+			phaseCell = prefix
 		}
 
 		rows = append(rows, table.Row{
@@ -236,47 +235,89 @@ const (
 	glyphEnd    spanGlyph = '└' // response row paired with an earlier request
 )
 
-// computeSpanGlyphs assigns each row a tree glyph drawn from its
-// position relative to ALL (req, resp) spans in the row list. Priority
-// when a row could carry multiple glyphs (overlapping pairs): end
-// beats start beats middle. The user only needs "this row is part of
-// some pair structure" — not which specific pair.
+// spanLevels holds the box-drawing glyphs for up to two levels of
+// nested (req, resp) spans on a single row. outer is the largest span
+// containing the row; inner is the next-largest. Deeper nesting is
+// not surfaced — operators only need the broad shape, not the full
+// nesting tree.
+type spanLevels struct {
+	outer spanGlyph
+	inner spanGlyph
+}
+
+// prefix returns the concatenated rune string for the PHASE-column
+// prefix: e.g. "│┌" when the row is inside an outer span and at the
+// start of an inner span; "└" alone when only an outer endpoint
+// applies; "" when the row is in no pair span.
+func (s spanLevels) prefix() string {
+	switch {
+	case s.outer == glyphNone:
+		return ""
+	case s.inner == glyphNone:
+		return string(rune(s.outer))
+	default:
+		return string([]rune{rune(s.outer), rune(s.inner)})
+	}
+}
+
+// computeSpanGlyphs assigns each row up to two tree glyphs (outer +
+// inner) drawn from its position relative to all (req, resp) spans in
+// the row list. The two largest spans containing the row are surfaced;
+// deeper nesting is dropped so the PHASE column doesn't blow its
+// 6-char width budget.
 //
 // pairs is the bidirectional map from pairInvocationRows: pairs[i]=j
 // AND pairs[j]=i for any matched pair (i, j). Unpaired rows are absent.
 // n is the total row count.
-func computeSpanGlyphs(pairs map[int]int, n int) []spanGlyph {
-	out := make([]spanGlyph, n)
+func computeSpanGlyphs(pairs map[int]int, n int) []spanLevels {
+	out := make([]spanLevels, n)
 	if len(pairs) == 0 {
 		return out
 	}
-	// First pass: stamp middle glyphs for every row strictly inside
-	// any pair span. A row may sit inside multiple overlapping spans;
-	// stamping is idempotent because the glyph is the same.
+	// Collect each pair (a, b) with a < b once; the resp→req mirror
+	// entries are skipped.
+	type span struct{ a, b int }
+	spans := make([]span, 0, len(pairs)/2)
 	for a, b := range pairs {
-		if a >= b {
-			continue // skip the resp→req mirror; iterate each pair once
-		}
-		for k := a + 1; k < b && k < n; k++ {
-			out[k] = glyphMiddle
+		if a < b {
+			spans = append(spans, span{a, b})
 		}
 	}
-	// Second pass: endpoints overwrite middle so the corners always win.
-	for a, b := range pairs {
-		if a >= b {
-			continue
+
+	glyphAt := func(s span, i int) spanGlyph {
+		switch {
+		case i == s.a:
+			return glyphStart
+		case i == s.b:
+			return glyphEnd
+		case s.a < i && i < s.b:
+			return glyphMiddle
 		}
-		if a < n {
-			// Don't overwrite end with start; if both fire on the same
-			// row (a chain that closes one pair and opens another at
-			// the same index), end wins because closing a pair is the
-			// stronger visual anchor.
-			if out[a] != glyphEnd {
-				out[a] = glyphStart
+		return glyphNone
+	}
+
+	for i := range n {
+		// Find every span this row participates in (endpoint or
+		// strictly inside).
+		var participating []span
+		for _, s := range spans {
+			if s.a <= i && i <= s.b {
+				participating = append(participating, s)
 			}
 		}
-		if b < n {
-			out[b] = glyphEnd
+		if len(participating) == 0 {
+			continue
+		}
+		// Sort by width descending — outer (widest) first, then inner.
+		// Stable so equal-width spans keep their declaration order
+		// (irrelevant in practice but keeps tests deterministic).
+		sort.SliceStable(participating, func(p, q int) bool {
+			return (participating[p].b - participating[p].a) >
+				(participating[q].b - participating[q].a)
+		})
+		out[i].outer = glyphAt(participating[0], i)
+		if len(participating) > 1 {
+			out[i].inner = glyphAt(participating[1], i)
 		}
 	}
 	return out
