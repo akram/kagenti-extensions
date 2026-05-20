@@ -181,12 +181,16 @@ func main() {
 		fpMTLS = &forwardproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
 		slog.Info("mTLS enabled", "mode", cfg.MTLS.ResolvedMode(),
 			"cert", cfg.MTLS.CertFile, "key", cfg.MTLS.KeyFile, "bundle", cfg.MTLS.BundleFile)
-		// Early-warning for misconfigured paths — see authbridge-proxy
-		// main.go for the full rationale.
-		if missing := cfg.MTLS.CheckPathsReadable(); len(missing) > 0 {
-			slog.Warn("mtls cert paths not yet readable; will retry on first handshake (expected during pod startup before spiffe-helper writes)",
-				"missing", missing)
+		// Wait for spiffe-helper to write the SVID files before
+		// constructing the TLS-aware listeners — see authbridge-proxy
+		// main.go for the full rationale (unbounded wait, kubelet
+		// readiness surfaces the not-ready state).
+		for _, p := range []string{cfg.MTLS.CertFile, cfg.MTLS.KeyFile, cfg.MTLS.BundleFile} {
+			if _, err := config.WaitForCredentialFile(context.Background(), p); err != nil {
+				log.Fatalf("waiting for mtls cert file %s: %v", p, err)
+			}
 		}
+		slog.Info("mtls cert files ready")
 	} else {
 		slog.Info("mTLS disabled (no mtls block in config)")
 	}

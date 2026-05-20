@@ -190,15 +190,28 @@ func main() {
 		fpMTLS = &forwardproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
 		slog.Info("mTLS enabled", "mode", cfg.MTLS.ResolvedMode(),
 			"cert", cfg.MTLS.CertFile, "key", cfg.MTLS.KeyFile, "bundle", cfg.MTLS.BundleFile)
-		// Early-warning for misconfigured paths. The X509Source's
-		// per-handshake re-read makes cold-start work even when
-		// spiffe-helper hasn't written yet, so we WARN (not error) —
-		// but operators who fat-fingered a path otherwise wouldn't
-		// learn until first traffic, when the listener returns 503s.
-		if missing := cfg.MTLS.CheckPathsReadable(); len(missing) > 0 {
-			slog.Warn("mtls cert paths not yet readable; will retry on first handshake (expected during pod startup before spiffe-helper writes)",
-				"missing", missing)
+		// Cold-start gate: tls.ServerConfig probes the source at
+		// construction and errors hard if files don't exist. spiffe-helper
+		// writes asynchronously after pod start; on a freshly
+		// bootstrapping cluster the SPIRE controller-manager + agent
+		// path can take more than a minute (entry rendering, agent
+		// attestation, SVID issuance). We wait indefinitely
+		// (heartbeats every 60s while the file is missing) and let the
+		// kubelet's readiness probe surface "not ready yet" — same
+		// pattern jwt-validation and token-exchange use for their
+		// credential files. Pod stays 1/2 Ready until SVIDs land.
+		//
+		// On SIGTERM during the wait the process is killed before
+		// listeners bind, which is the right behavior when startup
+		// hasn't completed. The Fatalf is unreachable with
+		// context.Background but kept for safety if someone later
+		// plumbs in a cancellable context.
+		for _, p := range []string{cfg.MTLS.CertFile, cfg.MTLS.KeyFile, cfg.MTLS.BundleFile} {
+			if _, err := config.WaitForCredentialFile(context.Background(), p); err != nil {
+				log.Fatalf("waiting for mtls cert file %s: %v", p, err)
+			}
 		}
+		slog.Info("mtls cert files ready")
 	} else {
 		slog.Info("mTLS disabled (no mtls block in config)")
 	}
