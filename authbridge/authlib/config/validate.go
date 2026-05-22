@@ -63,6 +63,15 @@ func validateCrossBlock(cfg *Config) error {
 // token-exchange entry whose identity.type is "spiffe". Loose-decode
 // against an inline struct so this validator stays in the config layer
 // without importing the plugin package.
+//
+// NOTE: this walker does NOT filter on e.OnError == ErrorPolicyOff. An
+// entry that is gated off via on_error still triggers the cross-block
+// check that requires top-level spiffe.jwt_audience. Rationale:
+// dead-config validation catches typos and forgotten flag-flips at
+// startup. If an operator wants to leave a token-exchange entry in
+// YAML with identity.type: spiffe but no audience, they must remove
+// the entry rather than just disabling it. This is the strict-but-
+// simple choice; loosen if it bites.
 func anyTokenExchangeUsesSPIFFE(cfg *Config) bool {
 	stages := [][]PluginEntry{
 		cfg.Pipeline.Inbound.Plugins,

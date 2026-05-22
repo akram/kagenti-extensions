@@ -3,8 +3,10 @@ package tokenexchange
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
@@ -55,13 +57,20 @@ func TestTokenExchange_Configure_DefaultIdentityPaths_SPIFFE(t *testing.T) {
 	defer func() {
 		// T11 will remove this recover. For now the spiffe identity
 		// path panics inside buildClientAuthFrom during Configure;
-		// catch it so the rest of the assertions can still run on the
-		// applyDefaults outcome.
-		if r := recover(); r != nil {
-			// expected — Configure reaches buildClientAuthFrom which
-			// panics until T11 wires Provider injection.
-			t.Skip("spiffe identity Configure path panics until T11 wires SPIFFE provider injection")
+		// catch ONLY the expected panic so a future unrelated panic on
+		// this code path fails the test loud instead of silently skipping.
+		// Once T11 lands and removes the panic, recover() returns nil and
+		// the test body runs to completion normally.
+		r := recover()
+		if r == nil {
+			return
 		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, "plan task T11") &&
+			!strings.Contains(msg, "SPIFFE provider injection") {
+			t.Fatalf("unexpected panic: %v", r)
+		}
+		t.Skip("spiffe identity Configure path panics until T11 wires SPIFFE provider injection")
 	}()
 	if err := p.Configure(raw); err != nil {
 		t.Fatalf("Configure: %v", err)
