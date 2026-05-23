@@ -2,14 +2,12 @@
 #
 # End-to-end:
 #
-#   make build-images          # 3 demo images (agent, email, evil)
-#   make build-authbridge      # rebuild authbridge from this branch
-#                              # under whatever tag the kagenti operator
-#                              # pulls (autodetected from a running pod)
-#   make load-images           # kind load all four
-#   make demo-ibac             # deploy + patch + ready-to-chat banner
-#   make show-result           # render pipeline forensic of last session
-#   make undeploy              # remove the demo's resources from team1
+#   make demo-ibac     # build + load demo images, deploy, patch, ready-to-chat banner
+#   make show-result   # render pipeline forensic of last session
+#   make undeploy      # remove the demo's resources from team1
+#
+# IBAC ships in the default authbridge image pulled by the kagenti chart,
+# so this demo only needs to enable the plugin in the rendered ConfigMap.
 #
 # Prerequisites:
 #   - kagenti installed on a kind cluster (this is the operator-flow
@@ -18,7 +16,7 @@
 #   - ollama on the host with llama3.2:3b pulled
 #   - kubectl, kind, podman/docker, python3 + PyYAML
 
-.PHONY: help build-images build-authbridge build-abctl load-images deploy \
+.PHONY: help build-images build-abctl load-images deploy \
         patch-config wait-reload demo-ibac show-result undeploy \
         logs-agent logs-evil preflight wait-pods
 
@@ -29,7 +27,7 @@
 help:  ## Show this menu (default)
 	@printf "\nIBAC demo — operator-injected agent in kagenti's team1 namespace.\n\n"
 	@printf "Typical run:\n"
-	@printf "  \033[1mmake build-images build-authbridge load-images demo-ibac\033[0m\n"
+	@printf "  \033[1mmake demo-ibac\033[0m\n"
 	@printf "  ... chat with email-agent in the kagenti UI ...\n"
 	@printf "  \033[1mmake show-result\033[0m\n"
 	@printf "  \033[1mmake undeploy\033[0m\n\n"
@@ -41,7 +39,6 @@ help:  ## Show this menu (default)
 	@printf "  \033[36m%-18s\033[0m %s\n" "KIND_CLUSTER_NAME" "kind cluster to load images into (default: kagenti)"
 	@printf "  \033[36m%-18s\033[0m %s\n" "NAMESPACE"         "agent namespace (default: team1)"
 	@printf "  \033[36m%-18s\033[0m %s\n" "AGENT_NAME"        "deployment name (default: email-agent)"
-	@printf "  \033[36m%-18s\033[0m %s\n" "AUTHBRIDGE_TAG"    "image tag override; auto-detected from a running pod"
 	@printf "  \033[36m%-18s\033[0m %s\n" "CONTAINER_RUNTIME" "podman or docker (auto-detected)"
 	@printf "\nPrerequisites: kagenti install on a kind cluster, ollama on the host\n"
 	@printf "with llama3.2:3b, kubectl/kind/podman, python3 + PyYAML.\n\n"
@@ -58,20 +55,6 @@ CONTAINER_RUNTIME ?= $(shell command -v podman >/dev/null 2>&1 && echo podman ||
 AGENT_IMAGE       := email-agent:latest
 EMAIL_IMAGE       := ibac-email-server:latest
 EVIL_IMAGE        := ibac-evil-server:latest
-
-# Auto-detect the authbridge image tag the operator is configured to
-# pull. Reads a running agent pod's authbridge-proxy container image.
-# Falls back to v0.6.0-alpha.3 (current chart pin at the time of
-# writing) when nothing is running yet — the user can override with
-# `make AUTHBRIDGE_TAG=v0.6.0-alpha.4 ...`.
-AUTHBRIDGE_TAG ?= $(shell kubectl get pod -A \
-    -o jsonpath='{range .items[*]}{.spec.containers[?(@.name=="authbridge-proxy")].image}{"\n"}{end}' 2>/dev/null \
-    | grep -E '^ghcr.io/kagenti/kagenti-extensions/authbridge:' \
-    | head -1 | awk -F: '{print $$NF}')
-ifeq ($(AUTHBRIDGE_TAG),)
-  AUTHBRIDGE_TAG := v0.6.0-alpha.3
-endif
-AUTHBRIDGE_IMAGE := ghcr.io/kagenti/kagenti-extensions/authbridge:$(AUTHBRIDGE_TAG)
 
 # ---------- Pre-flight ----------
 
@@ -109,27 +92,14 @@ build-abctl:  ## Build abctl into /tmp (cached, used by show-result)
 	  cd ../../cmd/abctl && go build -o /tmp/abctl-ibac-demo . ; \
 	fi
 
-build-authbridge:  ## Rebuild authbridge from this branch under operator-pinned tag
-	@# Fail loudly if invoked from outside authbridge/demos/ibac/.
-	@test -f ../../cmd/authbridge-proxy/Dockerfile || { \
-	  echo "build-authbridge must be run from authbridge/demos/ibac/"; \
-	  echo "(expected ../../cmd/authbridge-proxy/Dockerfile to exist)"; \
-	  exit 1; \
-	}
-	@echo "[*] Building authbridge:$(AUTHBRIDGE_TAG) (matches operator-pinned tag)"
-	cd ../.. && $(CONTAINER_RUNTIME) build \
-	  -f cmd/authbridge-proxy/Dockerfile -t $(AUTHBRIDGE_IMAGE) .
-
-load-images:  ## Load all four images into the kind cluster
-
-	kind load docker-image $(AGENT_IMAGE)      --name $(KIND_CLUSTER_NAME)
-	kind load docker-image $(EMAIL_IMAGE)      --name $(KIND_CLUSTER_NAME)
-	kind load docker-image $(EVIL_IMAGE)       --name $(KIND_CLUSTER_NAME)
-	kind load docker-image $(AUTHBRIDGE_IMAGE) --name $(KIND_CLUSTER_NAME)
+load-images:  ## Load demo images into the kind cluster
+	kind load docker-image $(AGENT_IMAGE) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(EMAIL_IMAGE) --name $(KIND_CLUSTER_NAME)
+	kind load docker-image $(EVIL_IMAGE)  --name $(KIND_CLUSTER_NAME)
 ifeq ($(CONTAINER_RUNTIME),podman)
-	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(AGENT_IMAGE)        docker.io/library/$(AGENT_IMAGE)        || true
-	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(EMAIL_IMAGE)        docker.io/library/$(EMAIL_IMAGE)        || true
-	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(EVIL_IMAGE)         docker.io/library/$(EVIL_IMAGE)         || true
+	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(AGENT_IMAGE) docker.io/library/$(AGENT_IMAGE) || true
+	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(EMAIL_IMAGE) docker.io/library/$(EMAIL_IMAGE) || true
+	$(CONTAINER_RUNTIME) exec $(KIND_NODE) ctr --namespace=k8s.io images tag localhost/$(EVIL_IMAGE)  docker.io/library/$(EVIL_IMAGE)  || true
 endif
 
 # ---------- Deploy + patch ----------
@@ -173,7 +143,7 @@ wait-reload:  ## Wait for the sidecar's hot-reload to pick up the patched config
 
 # ---------- Top-level demo + result rendering ----------
 
-demo-ibac: preflight deploy patch-config wait-reload  ## Deploy the demo end-to-end and print next-steps banner
+demo-ibac: preflight build-images load-images deploy patch-config wait-reload  ## Build, load, deploy the demo end-to-end and print next-steps banner
 	@echo
 	@echo "╔══════════════════════════════════════════════════════════╗"
 	@echo "║ ✅ IBAC demo agent ready in $(NAMESPACE)                          ║"

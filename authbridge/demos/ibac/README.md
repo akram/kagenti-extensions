@@ -10,7 +10,7 @@ A key design point: **the agent itself doesn't know IBAC exists.** IBAC is a tra
 
 ## What you'll see
 
-1. You run `make demo-ibac`. The Makefile builds the agent + email-server + evil-server images, rebuilds authbridge from this branch under whatever tag the operator pulls, deploys everything to `team1`, and patches the operator-rendered authbridge ConfigMap to enable IBAC. It ends with a "ready to chat" banner.
+1. You run `make demo-ibac`. The Makefile builds the agent + email-server + evil-server images, kind-loads them, deploys everything to `team1`, and patches the operator-rendered authbridge ConfigMap to enable IBAC. (The IBAC plugin already ships in the chart-pinned authbridge image — the demo only flips it on in the rendered config.) It ends with a "ready to chat" banner.
 2. You open the kagenti UI at `http://kagenti-ui.localtest.me:8080`, log in with Keycloak, find `email-agent` in the agent list, and type:
    ```
    Summarize my emails.
@@ -39,13 +39,7 @@ A key design point: **the agent itself doesn't know IBAC exists.** IBAC is a tra
 ```sh
 cd authbridge/demos/ibac
 
-make build-images       # 3 demo images
-make build-authbridge   # rebuild authbridge from this branch under
-                        # whatever tag the operator is configured to pull
-                        # (autodetected from a running pod; falls back
-                        # to v0.6.0-alpha.3)
-make load-images        # kind load all four images
-make demo-ibac          # deploy + patch + ready-to-chat banner
+make demo-ibac          # build + load demo images, deploy, patch, ready-to-chat banner
 
 # Open http://kagenti-ui.localtest.me:8080, find `email-agent`, chat
 # "Summarize my emails."
@@ -173,16 +167,6 @@ Example use cases for an override:
 ### `make demo-ibac` aborts with "kagenti-system not found"
 
 You don't have kagenti installed. Install it first ([guide](https://github.com/kagenti/kagenti/blob/main/docs/install.md)) — this demo uses operator-managed sidecar injection and Keycloak client registration; running on a plain kind cluster won't work.
-
-### Tag mismatch — agent pod stays in `ImagePullBackOff` for `authbridge-proxy`
-
-`make build-authbridge` autodetects the tag from a running agent pod, but on a freshly-installed kagenti there may be no agents yet. Override:
-
-```sh
-make AUTHBRIDGE_TAG=v0.6.0-alpha.4 build-authbridge load-images
-```
-
-The right tag is whatever the kagenti chart's `values.yaml` pins (see `charts/kagenti/values.yaml:authbridge` in the kagenti repo).
 
 ### Agent pod's authbridge container fails the IBAC config patch
 
