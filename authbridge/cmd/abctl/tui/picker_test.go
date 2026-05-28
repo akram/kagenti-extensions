@@ -77,5 +77,34 @@ func contains(haystack, needle string) bool {
 	return false
 }
 
+func TestPodsPaneListsPods(t *testing.T) {
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
+	loaded := m.Init()()
+	updated, _ := m.Update(loaded)
+	mm := updated.(*model)
+	// Drill into team1.
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = updated.(*model)
+	view := mm.View()
+	if !contains(view, "weather-agent-1") {
+		t.Fatalf("Pods view missing pod name:\n%s", view)
+	}
+	if !contains(view, "Running") {
+		t.Fatalf("Pods view missing phase column:\n%s", view)
+	}
+}
+
+func TestPodsPaneEscBacksOut(t *testing.T) {
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter}) // → panePods
+	updated, _ = updated.(*model).Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(*model)
+	if mm.pane != paneNamespaces {
+		t.Fatalf("Esc should back out to Namespaces, got pane %v", mm.pane)
+	}
+}
+
 // silence unused-import nag if test build trims this file later
 var _ = time.Second
