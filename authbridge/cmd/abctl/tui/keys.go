@@ -38,8 +38,13 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 					return nil
 				}
 				m.selectedPod = pods[cur].Name
-				// Task 7 wires the port-forward + session-view transition.
-				return nil
+				// Tear down the previous PF, if any, before starting a new one.
+				if m.activePF != nil {
+					_ = m.activePF.Close()
+					m.activePF = nil
+				}
+				m.pickerErr = ""
+				return startPortForwardCmd(m.portForwarder, m.selectedNamespace, m.selectedPod)
 			}
 			return nil
 		case "esc":

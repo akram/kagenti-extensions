@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -103,6 +104,82 @@ func TestPodsPaneEscBacksOut(t *testing.T) {
 	mm = updated.(*model)
 	if mm.pane != paneNamespaces {
 		t.Fatalf("Esc should back out to Namespaces, got pane %v", mm.pane)
+	}
+}
+
+// fakePortForwarder returns a no-op PortForward.
+type fakePortForwarder struct {
+	startedNs  string
+	startedPod string
+	endpoint   string
+	startErr   error
+	closeCount int
+}
+
+func (f *fakePortForwarder) Start(ctx context.Context, ns, pod string) (cluster.PortForward, error) {
+	if f.startErr != nil {
+		return nil, f.startErr
+	}
+	f.startedNs, f.startedPod = ns, pod
+	return &fakePortForward{endpoint: f.endpoint, parent: f}, nil
+}
+
+type fakePortForward struct {
+	endpoint string
+	parent   *fakePortForwarder
+}
+
+func (p *fakePortForward) Endpoint() string { return p.endpoint }
+func (p *fakePortForward) LocalPort() int   { return 0 }
+func (p *fakePortForward) Wait() error      { return nil }
+func (p *fakePortForward) Close() error     { p.parent.closeCount++; return nil }
+
+func TestPodEnterStartsPortForwardAndTransitions(t *testing.T) {
+	pf := &fakePortForwarder{endpoint: "http://127.0.0.1:60000"}
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, pf)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter}) // → panePods
+	mm = updated.(*model)
+	updated, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyEnter}) // start PF
+	mm = updated.(*model)
+	if cmd == nil {
+		t.Fatal("Enter on pod should produce a Cmd to start the PF")
+	}
+	msg := cmd()
+	conn, ok := msg.(portForwardReadyMsg)
+	if !ok {
+		t.Fatalf("PF cmd produced %T, want portForwardReadyMsg", msg)
+	}
+	updated, _ = mm.Update(conn)
+	mm = updated.(*model)
+	if mm.pane != paneSessions {
+		t.Fatalf("after PF ready, pane should be paneSessions, got %v", mm.pane)
+	}
+	if mm.endpoint != "http://127.0.0.1:60000" {
+		t.Fatalf("model endpoint not set: %q", mm.endpoint)
+	}
+	if pf.startedNs != "team1" || pf.startedPod != "weather-agent-1" {
+		t.Fatalf("PortForwarder.Start not called with selection: ns=%q pod=%q", pf.startedNs, pf.startedPod)
+	}
+}
+
+func TestPodEnterSurfacesPortForwardError(t *testing.T) {
+	pf := &fakePortForwarder{startErr: fmt.Errorf("forbidden")}
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, pf)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter}) // → panePods
+	mm = updated.(*model)
+	updated, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyEnter}) // start PF
+	mm = updated.(*model)
+	updated, _ = mm.Update(cmd())
+	mm = updated.(*model)
+	if mm.pane != panePods {
+		t.Fatalf("PF error should keep us on panePods, got %v", mm.pane)
+	}
+	if !contains(mm.pickerErr, "forbidden") {
+		t.Fatalf("error not surfaced in pickerErr: %q", mm.pickerErr)
 	}
 }
 

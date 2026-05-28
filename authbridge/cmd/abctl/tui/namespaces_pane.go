@@ -3,10 +3,14 @@ package tui
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
 )
 
@@ -34,23 +38,43 @@ func (m *model) rebuildNamespacesTable() {
 
 // loadAgentsCmd produces a tea.Cmd that calls Lister.ListAgents and
 // emits an agentsLoadedMsg.
-func loadAgentsCmd(lister cluster.Lister) tea.Cmd {
+func loadAgentsCmd(ctx context.Context, lister cluster.Lister) tea.Cmd {
 	return func() tea.Msg {
-		ns, err := lister.ListAgents(context.Background())
+		ns, err := lister.ListAgents(ctx)
 		return agentsLoadedMsg{namespaces: ns, err: err}
 	}
 }
 
 // newPickerModel constructs a model already in the Namespaces pane,
 // wired with the given Lister and PortForwarder. Used when --endpoint
-// is not given.
+// is not given. Mirrors the field initialization in New() so that
+// transitioning to paneSessions after a port-forward is established
+// finds all fields ready.
 func newPickerModel(ctx context.Context, lister cluster.Lister, pf cluster.PortForwarder) *model {
-	m := &model{
+	ctx, cancel := context.WithCancel(ctx)
+
+	ti := textinput.New()
+	ti.Placeholder = "filter…"
+	ti.Prompt = "/ "
+
+	return &model{
+		// endpoint and client are set later, when portForwardReadyMsg arrives.
+		ctx:         ctx,
+		cancel:      cancel,
+		events:      make(map[string][]pipeline.SessionEvent),
+		pane:        paneNamespaces,
+		sessionsTbl: newSessionsTable(),
+		eventsTbl:   newEventsTable(),
+		pipelineTbl: newPipelineTable(),
+		detailVp:    viewport.New(0, 0),
+		filterInput: ti,
+		lastTick:    time.Now(),
+		connState:   connStateInfo{phase: connConnecting},
+
+		// Picker-only:
 		lister:        lister,
 		portForwarder: pf,
-		pane:          paneNamespaces,
 		namespacesTbl: newNamespacesTable(),
 		podsTbl:       newPodsTable(),
 	}
-	return m
 }

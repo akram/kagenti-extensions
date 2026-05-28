@@ -90,6 +90,14 @@ type agentsLoadedMsg struct {
 	err        error
 }
 
+// portForwardReadyMsg carries the result of PortForwarder.Start. On success,
+// pf and endpoint are set; on failure, err is set.
+type portForwardReadyMsg struct {
+	pf       cluster.PortForward
+	endpoint string
+	err      error
+}
+
 // Model is the top-level Bubble Tea model.
 type model struct {
 	endpoint string
@@ -168,6 +176,10 @@ type model struct {
 	selectedPod       string // set on Enter from Pods pane
 
 	pickerErr string // single-line picker error shown in footer
+
+	// activePF is the live port-forward tunnel, if any. Closed on pod-switch
+	// or quit.
+	activePF cluster.PortForward
 }
 
 // New returns a fresh model pointed at the given client. ctx governs both
@@ -196,12 +208,9 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 	}
 }
 
-// Init fires the initial fetch + starts the SSE pump and the tick.
-func (m *model) Init() tea.Cmd {
-	if m.pane == paneNamespaces {
-		// Picker mode — load agents, then idle until user picks a pod.
-		return loadAgentsCmd(m.lister)
-	}
+// initSessionView fires the session-view bootstrap: SSE pump, first
+// fetch, ticks. Caller must have set m.client and m.ctx.
+func (m *model) initSessionView() tea.Cmd {
 	m.streamCh = m.client.Stream(m.ctx, "")
 	return tea.Batch(
 		m.loadSessionsCmd(),
@@ -210,6 +219,16 @@ func (m *model) Init() tea.Cmd {
 		tickCmd(),
 		refreshTickCmd(),
 	)
+}
+
+// Init fires the initial fetch + starts the SSE pump and the tick.
+// In picker mode (paneNamespaces), it loads the agent list instead.
+func (m *model) Init() tea.Cmd {
+	if m.pane == paneNamespaces {
+		// Picker mode — load agents, then idle until user picks a pod.
+		return loadAgentsCmd(m.ctx, m.lister)
+	}
+	return m.initSessionView()
 }
 
 // loadPipelineCmd fetches /v1/pipeline once at startup. The pipeline is
@@ -369,6 +388,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.namespaces = msg.namespaces
 		m.rebuildNamespacesTable()
 		return m, nil
+
+	case portForwardReadyMsg:
+		if msg.err != nil {
+			m.pickerErr = "port-forward: " + msg.err.Error()
+			return m, nil
+		}
+		m.activePF = msg.pf
+		m.endpoint = msg.endpoint
+		m.client = apiclient.New(m.endpoint)
+		m.pane = paneSessions
+		return m, m.initSessionView()
 
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
@@ -584,7 +614,11 @@ func trim[T any](s []T, n int) []T {
 // Convenience wrapper around tea.Program.Run for main.go.
 func Run(ctx context.Context, endpoint string) error {
 	c := apiclient.New(endpoint)
-	p := tea.NewProgram(New(ctx, c), tea.WithAltScreen())
+	m := New(ctx, c).(*model)
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
+	if m.activePF != nil {
+		_ = m.activePF.Close()
+	}
 	return err
 }

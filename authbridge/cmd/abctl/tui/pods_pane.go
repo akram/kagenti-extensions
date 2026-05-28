@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"context"
+
 	"github.com/charmbracelet/bubbles/table"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
 )
@@ -49,4 +52,18 @@ func (m *model) currentPodsList() []cluster.Pod {
 		}
 	}
 	return nil
+}
+
+// startPortForwardCmd produces a Cmd that calls PortForwarder.Start and
+// emits a portForwardReadyMsg. Uses context.Background() because the
+// port-forward subprocess must outlive the per-picker context; it is
+// terminated explicitly via activePF.Close().
+func startPortForwardCmd(pf cluster.PortForwarder, ns, pod string) tea.Cmd {
+	return func() tea.Msg {
+		conn, err := pf.Start(context.Background(), ns, pod)
+		if err != nil {
+			return portForwardReadyMsg{err: err}
+		}
+		return portForwardReadyMsg{pf: conn, endpoint: conn.Endpoint()}
+	}
 }
