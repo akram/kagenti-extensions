@@ -10,7 +10,12 @@ package edit
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -149,4 +154,104 @@ func BuildManifest(origCMYAML, newInner []byte) ([]byte, error) {
 		return nil, fmt.Errorf("emit ConfigMap manifest: %w", err)
 	}
 	return out, nil
+}
+
+// Runner abstracts a `kubectl <args>` invocation. Production uses os/exec;
+// tests inject their own. Mirrors the Runner pattern in cmd/abctl/cluster.
+type Runner func(ctx context.Context, args ...string) ([]byte, error)
+
+// DefaultRunner shells out to the system `kubectl`.
+func DefaultRunner(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("kubectl: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, fmt.Errorf("kubectl: %w", err)
+	}
+	return out, nil
+}
+
+// FetchedPipeline is what Fetch returns: the full ConfigMap manifest, the
+// inner runtime YAML extracted from data.config.yaml, and the byte range
+// of the pipeline subtree within the inner YAML.
+type FetchedPipeline struct {
+	ConfigMapYAML []byte // raw kubectl get cm -o yaml output
+	InnerYAML     []byte // value of data.config.yaml
+	PipelineStart int    // byte offset in InnerYAML where pipeline: begins
+	PipelineEnd   int    // byte offset where the subtree ends
+}
+
+// Fetch reads the per-agent ConfigMap (authbridge-config-<agent>), extracts
+// the inner runtime YAML from data.config.yaml, and locates the pipeline
+// subtree's byte range. Returns an error if the ConfigMap doesn't exist,
+// has no data.config.yaml, or has no top-level pipeline: key.
+func Fetch(ctx context.Context, run Runner, namespace, agent string) (*FetchedPipeline, error) {
+	cmName := "authbridge-config-" + agent
+	cmBytes, err := run(ctx, "get", "cm", cmName, "-n", namespace, "-o", "yaml")
+	if err != nil {
+		return nil, err
+	}
+	inner, err := extractInnerYAML(cmBytes)
+	if err != nil {
+		return nil, err
+	}
+	start, end, err := FindPipelineRange(inner)
+	if err != nil {
+		return nil, err
+	}
+	return &FetchedPipeline{
+		ConfigMapYAML: cmBytes,
+		InnerYAML:     inner,
+		PipelineStart: start,
+		PipelineEnd:   end,
+	}, nil
+}
+
+// extractInnerYAML pulls data.config.yaml out of an outer ConfigMap manifest.
+func extractInnerYAML(cmYAML []byte) ([]byte, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(cmYAML, &root); err != nil {
+		return nil, fmt.Errorf("parse ConfigMap manifest: %w", err)
+	}
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return nil, fmt.Errorf("ConfigMap manifest is not a document")
+	}
+	doc := root.Content[0]
+	for i := 0; i+1 < len(doc.Content); i += 2 {
+		if doc.Content[i].Value == "data" {
+			dataNode := doc.Content[i+1]
+			for j := 0; j+1 < len(dataNode.Content); j += 2 {
+				if dataNode.Content[j].Value == "config.yaml" {
+					return []byte(dataNode.Content[j+1].Value), nil
+				}
+			}
+		}
+	}
+	return nil, fmt.Errorf("ConfigMap data has no config.yaml key")
+}
+
+// Apply writes manifest to a tempfile and runs kubectl apply --server-side.
+// Returns the wall-clock time at which the apply call started; the caller
+// uses this to compare against /reload/status's last_success_unix to know
+// whether the framework has picked up the change yet.
+func Apply(ctx context.Context, run Runner, manifest []byte) (time.Time, error) {
+	tmp, err := os.CreateTemp("", "abctl-cm-*.yaml")
+	if err != nil {
+		return time.Time{}, fmt.Errorf("create temp manifest: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(manifest); err != nil {
+		_ = tmp.Close()
+		return time.Time{}, fmt.Errorf("write temp manifest: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return time.Time{}, fmt.Errorf("close temp manifest: %w", err)
+	}
+	applyTime := time.Now()
+	if _, err := run(ctx, "apply", "--server-side", "--force-conflicts=false", "-f", tmp.Name()); err != nil {
+		return time.Time{}, err
+	}
+	return applyTime, nil
 }

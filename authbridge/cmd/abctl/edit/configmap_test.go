@@ -1,8 +1,12 @@
 package edit
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 const fixtureMidYAML = `mode: proxy-sidecar
@@ -183,4 +187,94 @@ session:
 	if strings.Contains(outS, "issuer: old") {
 		t.Fatalf("old content still in manifest:\n%s", outS)
 	}
+}
+
+func TestFetch_HappyPath(t *testing.T) {
+	wantArgs := []string{
+		"get", "cm", "authbridge-config-email-agent",
+		"-n", "team1", "-o", "yaml",
+	}
+	stub := func(ctx context.Context, args ...string) ([]byte, error) {
+		if !equalArgs(args, wantArgs) {
+			t.Fatalf("kubectl args: got %v want %v", args, wantArgs)
+		}
+		return []byte(fixtureCMYAML), nil
+	}
+	fp, err := Fetch(context.Background(), stub, "team1", "email-agent")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(fp.ConfigMapYAML) == 0 {
+		t.Fatal("ConfigMapYAML empty")
+	}
+	if len(fp.InnerYAML) == 0 {
+		t.Fatal("InnerYAML empty")
+	}
+	if fp.PipelineEnd <= fp.PipelineStart {
+		t.Fatalf("pipeline range invalid: [%d, %d)", fp.PipelineStart, fp.PipelineEnd)
+	}
+	subtree := fp.InnerYAML[fp.PipelineStart:fp.PipelineEnd]
+	if !strings.Contains(string(subtree), "pipeline:") {
+		t.Fatalf("subtree missing header: %q", subtree)
+	}
+	if !strings.Contains(string(subtree), "jwt-validation") {
+		t.Fatalf("subtree missing body: %q", subtree)
+	}
+}
+
+func TestFetch_KubectlError(t *testing.T) {
+	stub := func(ctx context.Context, args ...string) ([]byte, error) {
+		return nil, fmt.Errorf("forbidden")
+	}
+	_, err := Fetch(context.Background(), stub, "team1", "email-agent")
+	if err == nil {
+		t.Fatal("want error from kubectl")
+	}
+	if !strings.Contains(err.Error(), "forbidden") {
+		t.Fatalf("error should surface kubectl message: %v", err)
+	}
+}
+
+func TestApply_PassesManifest(t *testing.T) {
+	captured := make([]byte, 0)
+	stub := func(ctx context.Context, args ...string) ([]byte, error) {
+		// Args should be: apply --server-side --force-conflicts=false -f <path>
+		if len(args) < 4 || args[0] != "apply" || args[1] != "--server-side" {
+			t.Fatalf("kubectl args: %v", args)
+		}
+		path := args[len(args)-1]
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read manifest: %v", err)
+		}
+		captured = b
+		return []byte("configmap/foo applied\n"), nil
+	}
+	manifest := []byte("apiVersion: v1\nkind: ConfigMap\n")
+	at, err := Apply(context.Background(), stub, manifest)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if at.IsZero() {
+		t.Fatal("apply time should be set")
+	}
+	if time.Since(at) > 5*time.Second {
+		t.Fatalf("apply time too far in past: %v", at)
+	}
+	if string(captured) != string(manifest) {
+		t.Fatalf("manifest captured by stub differs from input")
+	}
+}
+
+// equalArgs checks two []string for equality.
+func equalArgs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
