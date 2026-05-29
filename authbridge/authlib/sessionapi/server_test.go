@@ -366,6 +366,65 @@ func TestHandlePipeline_NilPipelines(t *testing.T) {
 	}
 }
 
+// TestHandlePipelineSurfacesConfig verifies that the Config field on
+// /v1/pipeline carries each Configurable plugin's raw config bytes
+// (when wrapped by the registry's WrapConfigured), and that
+// non-Configurable plugins emit no Config field.
+func TestHandlePipelineSurfacesConfig(t *testing.T) {
+	configRaw := json.RawMessage(`{"hello":"world"}`)
+	wrapped := pipeline.WrapConfigured(&fakePlugin{name: "with-config"}, configRaw)
+	plain := &fakePlugin{name: "without-config"}
+
+	inbound, err := pipeline.New([]pipeline.Plugin{wrapped, plain})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	srv := New(":0", store, WithPipelines(pipeline.NewHolder(inbound), nil))
+	ts := httptest.NewServer(srv.server.Handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/v1/pipeline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var body struct {
+		Inbound []struct {
+			Name   string          `json:"name"`
+			Config json.RawMessage `json:"config,omitempty"`
+		} `json:"inbound"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Inbound) != 2 {
+		t.Fatalf("want 2 plugins, got %d", len(body.Inbound))
+	}
+	for _, p := range body.Inbound {
+		switch p.Name {
+		case "with-config":
+			if string(p.Config) != `{"hello":"world"}` {
+				t.Fatalf("with-config Config: got %q want %q",
+					string(p.Config), `{"hello":"world"}`)
+			}
+		case "without-config":
+			if len(p.Config) != 0 {
+				t.Fatalf("without-config should emit no Config, got %q",
+					string(p.Config))
+			}
+		default:
+			t.Fatalf("unexpected plugin name: %q", p.Name)
+		}
+	}
+}
+
 func TestHandleHealthz(t *testing.T) {
 	ts, _ := newTestServer(t)
 	resp, err := http.Get(ts.URL + "/healthz")

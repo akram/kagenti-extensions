@@ -104,12 +104,13 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 
 // pipelinePluginView is the wire shape for one plugin in /v1/pipeline.
 type pipelinePluginView struct {
-	Name       string   `json:"name"`
-	Direction  string   `json:"direction"`
-	Position   int      `json:"position"` // 1-based order within its direction
-	BodyAccess bool     `json:"bodyAccess"`
-	Writes     []string `json:"writes,omitempty"`
-	Reads      []string `json:"reads,omitempty"`
+	Name       string          `json:"name"`
+	Direction  string          `json:"direction"`
+	Position   int             `json:"position"` // 1-based order within its direction
+	BodyAccess bool            `json:"bodyAccess"`
+	Writes     []string        `json:"writes,omitempty"`
+	Reads      []string        `json:"reads,omitempty"`
+	Config     json.RawMessage `json:"config,omitempty"`
 }
 
 // handlePipeline returns the composition of the inbound and outbound
@@ -139,7 +140,7 @@ func describePipeline(h *pipeline.Holder, direction string) []pipelinePluginView
 	out := make([]pipelinePluginView, len(plugins))
 	for i, pl := range plugins {
 		caps := pl.Capabilities()
-		out[i] = pipelinePluginView{
+		view := pipelinePluginView{
 			Name:       pl.Name(),
 			Direction:  direction,
 			Position:   i + 1,
@@ -147,6 +148,13 @@ func describePipeline(h *pipeline.Holder, direction string) []pipelinePluginView
 			Writes:     caps.Writes,
 			Reads:      caps.Reads,
 		}
+		// Surface raw config when the plugin was wrapped by the registry.
+		// Non-Configurable plugins type-assert false; Config stays nil and
+		// json.Marshal omits it via omitempty.
+		if rc, ok := pl.(interface{ RawConfig() json.RawMessage }); ok {
+			view.Config = rc.RawConfig()
+		}
+		out[i] = view
 	}
 	return out
 }
