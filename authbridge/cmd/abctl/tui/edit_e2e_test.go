@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -67,7 +68,7 @@ func TestEditFlow_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"last_success_unix": int64(99999999999),
+			"last_success": time.Now().Add(1 * time.Hour).Format(time.RFC3339Nano),
 		})
 	}))
 	defer srv.Close()

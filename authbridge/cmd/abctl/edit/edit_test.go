@@ -59,7 +59,8 @@ func TestPollCmd_Success(t *testing.T) {
 	applyTime := time.Now()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"last_success_unix":99999999999}`))
+		ts := time.Now().Add(1 * time.Hour).Format(time.RFC3339Nano)
+		_, _ = w.Write([]byte(`{"last_success":"` + ts + `"}`))
 	}))
 	defer srv.Close()
 	cmd := PollCmd(context.Background(), srv.URL, applyTime)

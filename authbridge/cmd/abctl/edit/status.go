@@ -8,12 +8,13 @@ import (
 )
 
 // ReloadStatus is the wire shape of the framework's /reload/status endpoint.
-// Only the fields abctl uses are decoded.
+// Only the fields abctl uses are decoded. Keys must match
+// authlib/reloader/status.go exactly.
 type ReloadStatus struct {
-	LastSuccessUnix int64  `json:"last_success_unix"`
-	ReloadsOK       uint64 `json:"reloads_ok"`
-	ReloadsFailed   uint64 `json:"reloads_failed"`
-	LastError       string `json:"last_error"`
+	LastSuccess   time.Time `json:"last_success"`
+	ReloadsOK     int64     `json:"reloads_ok"`
+	ReloadsFailed int64     `json:"reloads_failed"`
+	LastError     string    `json:"last_error"`
 }
 
 // PollResultStatus is a sum type for PollUntilReloaded outcomes.
@@ -32,13 +33,18 @@ type PollResult struct {
 	LastError string // populated when Status == PollFailure
 }
 
+// baselineFailedSentinel marks the "baseline not yet captured" state for
+// the reloads_failed counter. The first successful poll snaps it to the
+// current value so we only react to NEW failures after our apply.
+const baselineFailedSentinel int64 = -1
+
 // pollInterval is the cadence between /reload/status fetches. 1s balances
 // user-visible spinner progress with not hammering the cluster on slow
 // reloads.
 const pollInterval = 1 * time.Second
 
 // PollUntilReloaded watches statusURL/reload/status until either:
-//   - LastSuccessUnix > applyTime.Unix() → PollSuccess.
+//   - LastSuccess > applyTime → PollSuccess.
 //   - ReloadsFailed exceeds the value at first successful poll → PollFailure
 //     with LastError populated.
 //   - ctx is done → PollTimeout. (Caller is expected to set a 120s timeout
@@ -50,8 +56,7 @@ func PollUntilReloaded(ctx context.Context, statusURL string, applyTime time.Tim
 	url := statusURL + "/reload/status"
 	client := &http.Client{Timeout: 2 * time.Second}
 
-	var baselineFailed uint64
-	first := true
+	baselineFailed := baselineFailedSentinel
 
 	for {
 		select {
@@ -70,11 +75,10 @@ func PollUntilReloaded(ctx context.Context, statusURL string, applyTime time.Tim
 			decodeErr := json.NewDecoder(resp.Body).Decode(&rs)
 			resp.Body.Close()
 			if decodeErr == nil {
-				if first {
+				if baselineFailed == baselineFailedSentinel {
 					baselineFailed = rs.ReloadsFailed
-					first = false
 				}
-				if rs.LastSuccessUnix > applyTime.Unix() {
+				if rs.LastSuccess.After(applyTime) {
 					return PollResult{Status: PollSuccess}
 				}
 				if rs.ReloadsFailed > baselineFailed {

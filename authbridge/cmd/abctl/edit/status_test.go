@@ -33,9 +33,9 @@ func TestPollUntilReloaded_Success(t *testing.T) {
 	srv := makeStatusServer(t, func() ReloadStatus {
 		c := calls.Add(1)
 		if c == 1 {
-			return ReloadStatus{LastSuccessUnix: applyTime.Add(-1 * time.Hour).Unix()}
+			return ReloadStatus{LastSuccess: applyTime.Add(-1 * time.Hour)}
 		}
-		return ReloadStatus{LastSuccessUnix: time.Now().Unix()}
+		return ReloadStatus{LastSuccess: time.Now()}
 	})
 	res := PollUntilReloaded(context.Background(), srv.URL, applyTime)
 	if res.Status != PollSuccess {
@@ -65,7 +65,7 @@ func TestPollUntilReloaded_Failure(t *testing.T) {
 func TestPollUntilReloaded_Timeout(t *testing.T) {
 	applyTime := time.Now()
 	srv := makeStatusServer(t, func() ReloadStatus {
-		return ReloadStatus{LastSuccessUnix: applyTime.Add(-1 * time.Hour).Unix()}
+		return ReloadStatus{LastSuccess: applyTime.Add(-1 * time.Hour)}
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
