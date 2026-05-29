@@ -59,7 +59,7 @@ session APIs that aren't in your kube context.
 
 ## Panes
 
-The UI has three panes. `Enter` drills in; `Esc` backs out.
+The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
 - **Sessions** (default): table of active sessions in the store, most
   recently updated first. Columns: ID, updated (relative), event count,
@@ -71,6 +71,18 @@ The UI has three panes. `Enter` drills in; `Esc` backs out.
 - **Detail**: pretty-printed JSON of a single event. Scroll with arrow
   keys; `y` yanks to `/tmp/abctl-event-<timestamp>.json` and flashes the
   path in the footer.
+- **Pipeline**: the active plugin chain in inbound + outbound order.
+  Columns: position, direction, plugin name, DEPS (✓/✗ — see "Plugin
+  dependencies" below), writes, body access, event count. `e` opens
+  the editor.
+- **Plugin detail**: drill-into-row for Pipeline or Catalog. Shows
+  description, position, reads/writes, body access, plugin config, and
+  per-dependency satisfaction status against the active chain.
+- **Catalog**: registered-plugin browser, opened by `P` from anywhere.
+  Lists every plugin the running binary knows how to construct,
+  including ones not in the active pipeline. Useful for discovering
+  what's available before adding to the pipeline. Sourced from
+  `/v1/plugins`.
 
 ## Keybindings
 
@@ -89,6 +101,8 @@ The UI has three panes. `Enter` drills in; `Esc` backs out.
 | `p` | any | pause/resume stream |
 | `y` | detail | yank event JSON to `/tmp` |
 | `g` / `G` | lists | jump to top / bottom |
+| `P` | sessions, pipeline, plugin-detail | open the registered-plugin catalog |
+| `r` | catalog | refresh the catalog from `/v1/plugins` |
 | `e` | pipeline | edit pipeline subtree in `$EDITOR` |
 | `y` | edit/diff | apply the edit |
 | `N` | edit/diff | abort the edit |
@@ -121,6 +135,27 @@ pipeline subtree.
 `e` is only available in picker mode. With `--endpoint`, the cluster
 fields needed to fetch and apply aren't populated; pressing `e`
 flashes a hint instead of opening a broken edit.
+
+### Pre-apply validation
+
+After save, abctl runs the same Requires/RequiresAny/After/Claims
+checks the framework runs at reload-time, against the cached
+`/v1/plugins` catalog. Issues land as a red banner above the diff
+in ~50ms instead of waiting through the kubelet sync (~60s) to
+discover them at hot-reload:
+
+```
+⚠ 1 validation issue — framework reload will reject:
+  • [outbound] ibac pos 1: Requires "mcp-parser", but it is not in the outbound chain
+```
+
+The y/N prompt becomes "apply anyway? (y/N)" — abctl's check is
+non-blocking. The framework's own validateRelationships is the
+source of truth and will fire again at reload regardless.
+
+Validation is silently skipped when the catalog isn't loaded
+(operator hasn't pressed `P` yet). Visit the catalog pane once to
+populate it for the rest of the session.
 
 ### Agent-name resolution
 
@@ -197,6 +232,33 @@ The poller terminates with one of:
 - **Timeout** — none of the above within 120s. Triggers an
   auto-rollback so the on-disk ConfigMap doesn't drift from the
   running pipeline.
+
+## Plugin dependencies
+
+Plugins declare dependencies in their `Capabilities()`:
+
+- **Requires**: hard dependency. The named plugin MUST be in the same
+  chain at a strictly-lower position; otherwise framework reload fails.
+- **RequiresAny**: soft OR. At least one of the listed plugins must
+  appear upstream; each one that IS present must be earlier.
+- **After**: ordering hint. If the named plugin IS present, it must
+  appear earlier; absent is OK.
+- **Claims**: exclusive ownership. Within one chain, two plugins
+  cannot both declare the same claim string.
+
+abctl surfaces these in three places:
+
+- **Pipeline pane DEPS column**: ✓ when all declared deps satisfied,
+  ✗ when any fail, blank when no deps declared. The footer hint
+  reports the count of plugins with unmet deps.
+- **Plugin detail pane**: per-dependency rows with ✓/✗ and the
+  satisfying upstream's position when applicable.
+- **Pre-apply validation in the editor**: catches missing/misordered
+  Requires before kubectl apply (~50ms vs ~60s framework roundtrip).
+  See the "Pre-apply validation" subsection above.
+
+The framework's own validateRelationships is the source of truth and
+runs at every reload. abctl's checks are the fast-feedback layer.
 
 ## Trust model
 
