@@ -589,15 +589,38 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case edit.PollSuccess:
 			m.editState = editState{phase: editPhaseDone}
 			return m, m.loadPipelineCmd()
-		case edit.PollFailure:
-			m.editState.phase = editPhaseError
-			m.editState.err = "reload failed: " + msg.Result.LastError
-			return m, nil
-		case edit.PollTimeout:
-			m.editState.phase = editPhaseError
-			m.editState.err = "reload not observed in 120s; check kubectl logs"
+		case edit.PollFailure, edit.PollTimeout:
+			// In-pod reload didn't take. The running pipeline is still
+			// the previous one; reconcile the ConfigMap back to match.
+			reason := msg.Result.LastError
+			if msg.Result.Status == edit.PollTimeout {
+				reason = "reload not observed in 120s"
+			}
+			origManifest, mErr := edit.BuildManifest(
+				m.editState.fetched.ConfigMapYAML,
+				m.editState.fetched.InnerYAML,
+			)
+			if mErr != nil {
+				m.editState.phase = editPhaseError
+				m.editState.err = "reload failed: " + reason +
+					"\n(rollback build failed: " + mErr.Error() + ")"
+				return m, nil
+			}
+			m.editState.phase = editPhaseRollback
+			return m, edit.RollbackCmd(m.ctx, m.editRunner, origManifest, reason)
+		}
+		return m, nil
+
+	case edit.RolledBackMsg:
+		m.editState.phase = editPhaseError
+		if msg.Err != nil {
+			m.editState.err = "reload failed: " + msg.ReloadErr +
+				"\nrollback also failed: " + msg.Err.Error() +
+				"\nConfigMap and running pipeline are out of sync; check kubectl"
 			return m, nil
 		}
+		m.editState.err = "reload failed: " + msg.ReloadErr +
+			"\nrolled back to previous ConfigMap"
 		return m, nil
 
 	case tea.KeyMsg:
@@ -872,4 +895,3 @@ func openEditorCmd(path string) tea.Cmd {
 		return editorExitedMsg{err: err}
 	})
 }
-

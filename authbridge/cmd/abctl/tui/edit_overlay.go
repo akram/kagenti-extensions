@@ -21,6 +21,7 @@ const (
 	editPhaseDiff
 	editPhaseApplying
 	editPhaseWaiting
+	editPhaseRollback // re-applying the original ConfigMap after a failed reload
 	editPhaseError
 )
 
@@ -75,6 +76,10 @@ func renderEditOverlay(s editState, width, height int) string {
 		b.WriteString("Waiting for hot-reload…")
 		b.WriteString("\n")
 		b.WriteString(styleHint.Render("(this can take up to 120s while kubelet syncs the ConfigMap)"))
+	case editPhaseRollback:
+		b.WriteString(styleTitle.Render("Edit pipeline — rolling back"))
+		b.WriteString("\n\n")
+		b.WriteString("Reload failed. Restoring previous ConfigMap…")
 	case editPhaseError:
 		b.WriteString(styleTitle.Render("Edit pipeline — error"))
 		b.WriteString("\n\n")

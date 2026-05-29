@@ -239,3 +239,69 @@ func TestEditFlow_NormalizesTrailingNewline(t *testing.T) {
 			mm.editState.editedRaw)
 	}
 }
+
+// TestEditFlow_RollbackOnReloadFailure verifies that when the in-pod
+// reload fails (PollFailure), abctl re-applies the original ConfigMap
+// content so the on-disk CM matches the still-running previous pipeline.
+func TestEditFlow_RollbackOnReloadFailure(t *testing.T) {
+	runner := &editFakeRunner{getResponse: []byte(editFixtureCMYAML)}
+	m := newPickerModel(context.Background(), nil, nil)
+	m.editRunner = runner.run
+	m.selectedNamespace = "team1"
+	m.selectedPod = "email-agent"
+	m.pane = panePipeline
+
+	// Drive through fetch → editor → diff → apply.
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	mm := updated.(*model)
+	fetchedMsg := cmd().(edit.FetchedMsg)
+	defer os.Remove(fetchedMsg.TempPath)
+
+	editedSubtree := []byte("pipeline:\n  inbound:\n    - name: bogus\n")
+	_ = os.WriteFile(fetchedMsg.TempPath, editedSubtree, 0o600)
+
+	updated, _ = mm.Update(fetchedMsg)
+	mm = updated.(*model)
+	updated, _ = mm.Update(editorExitedMsg{err: nil})
+	mm = updated.(*model)
+	updated, cmd = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	mm = updated.(*model)
+	appliedMsg := cmd().(edit.AppliedMsg)
+	updated, _ = mm.Update(appliedMsg)
+	mm = updated.(*model)
+
+	// Inject a PollFailure manually.
+	failure := edit.PolledMsg{Result: edit.PollResult{
+		Status:    edit.PollFailure,
+		LastError: "unknown plugin: bogus",
+	}}
+	updated, cmd = mm.Update(failure)
+	mm = updated.(*model)
+	if mm.editState.phase != editPhaseRollback {
+		t.Fatalf("phase = %v, want editPhaseRollback", mm.editState.phase)
+	}
+	if cmd == nil {
+		t.Fatal("expected RollbackCmd")
+	}
+
+	rolledBack := cmd().(edit.RolledBackMsg)
+	if rolledBack.Err != nil {
+		t.Fatalf("rollback Apply error: %v", rolledBack.Err)
+	}
+	updated, _ = mm.Update(rolledBack)
+	mm = updated.(*model)
+	if mm.editState.phase != editPhaseError {
+		t.Fatalf("phase = %v, want editPhaseError after rollback", mm.editState.phase)
+	}
+	if !strings.Contains(mm.editState.err, "rolled back") {
+		t.Fatalf("error should mention rollback; got %q", mm.editState.err)
+	}
+	// The rollback Apply (the LAST apply call) should have the
+	// ORIGINAL pipeline content, not the bogus one.
+	if strings.Contains(string(runner.applyManifest), "name: bogus") {
+		t.Fatalf("rollback manifest still contains bogus content:\n%s", runner.applyManifest)
+	}
+	if !strings.Contains(string(runner.applyManifest), "name: jwt-validation") {
+		t.Fatalf("rollback manifest missing original content:\n%s", runner.applyManifest)
+	}
+}

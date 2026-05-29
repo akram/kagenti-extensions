@@ -64,6 +64,26 @@ func ApplyCmd(ctx context.Context, run Runner, manifest []byte) tea.Cmd {
 	}
 }
 
+// RolledBackMsg is the result of RollbackCmd. ReloadErr is the error
+// from the failed in-pod reload (the reason we're rolling back); Err
+// is any error from the rollback Apply itself.
+type RolledBackMsg struct {
+	ReloadErr string
+	Err       error
+}
+
+// RollbackCmd re-applies the supplied (original) manifest to undo a
+// successful API write whose subsequent in-pod reload failed. The
+// running pipeline never moved (the framework keeps the previous
+// pipeline on build failure), so this just reconciles the ConfigMap
+// on disk back to what's actually serving.
+func RollbackCmd(ctx context.Context, run Runner, manifest []byte, reloadErr string) tea.Cmd {
+	return func() tea.Msg {
+		_, err := Apply(ctx, run, manifest)
+		return RolledBackMsg{ReloadErr: reloadErr, Err: err}
+	}
+}
+
 // PolledMsg is the result of PollCmd.
 type PolledMsg struct {
 	Result PollResult
