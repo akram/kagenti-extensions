@@ -69,6 +69,7 @@ func newPickerModel(ctx context.Context, lister cluster.Lister, pf cluster.PortF
 		sessionsTbl: newSessionsTable(),
 		eventsTbl:   newEventsTable(),
 		pipelineTbl: newPipelineTable(),
+		catalogTbl:  newCatalogTable(),
 		detailVp:    viewport.New(0, 0),
 		filterInput: ti,
 		lastTick:    time.Now(),

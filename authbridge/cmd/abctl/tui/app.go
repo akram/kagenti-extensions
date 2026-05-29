@@ -36,6 +36,7 @@ const (
 	paneDetail
 	panePipeline
 	panePluginDetail
+	paneCatalog
 )
 
 // Connection state for the SSE stream.
@@ -206,6 +207,7 @@ type model struct {
 	sessionsTbl  table.Model
 	eventsTbl    table.Model
 	pipelineTbl  table.Model
+	catalogTbl   table.Model
 	detailVp     viewport.Model
 	detailEvent  *pipeline.SessionEvent
 	detailPlugin *apiclient.PipelinePlugin
@@ -221,6 +223,15 @@ type model struct {
 	// GetPipeline response arrives; the pipeline pane shows "(loading…)"
 	// until then.
 	pipeline *apiclient.PipelineView
+
+	// catalog is the registered-plugin catalog from /v1/plugins,
+	// fetched lazily when the user first opens the catalog pane via
+	// `P`. Cached for the session; `r` from the catalog pane refreshes.
+	// nil before the first fetch; the catalog pane shows "(loading…)".
+	catalog *apiclient.PluginCatalog
+	// previousPane lets `Esc` from the catalog pane return to whichever
+	// pane the user came from instead of always defaulting to one.
+	previousPane paneID
 
 	// streamCh is the single SSE channel from the apiclient. Opened once
 	// in Init; re-pumped on every streamMsg until it closes.
@@ -281,6 +292,7 @@ func New(ctx context.Context, c *apiclient.Client) tea.Model {
 		sessionsTbl: newSessionsTable(),
 		eventsTbl:   newEventsTable(),
 		pipelineTbl: newPipelineTable(),
+		catalogTbl:  newCatalogTable(),
 		detailVp:    viewport.New(0, 0),
 		filterInput: ti,
 		lastTick:    time.Now(),
@@ -362,6 +374,24 @@ func (m *model) loadPipelineCmd() tea.Cmd {
 			return errMsg{where: "get pipeline", err: err}
 		}
 		return pipelineLoadedMsg(pv)
+	}
+}
+
+// catalogLoadedMsg carries the result of /v1/plugins. Distinct from
+// pipelineLoadedMsg because the catalog is the registered set, not
+// the active chain.
+type catalogLoadedMsg struct {
+	catalog *apiclient.PluginCatalog
+	err     error
+}
+
+// loadCatalogCmd fetches /v1/plugins. Called lazily when the user
+// presses `P` to enter the catalog pane; the result is cached on the
+// model and refreshed on demand.
+func (m *model) loadCatalogCmd() tea.Cmd {
+	return func() tea.Msg {
+		cat, err := m.client.GetPluginCatalog(m.ctx)
+		return catalogLoadedMsg{catalog: cat, err: err}
 	}
 }
 
@@ -478,6 +508,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pipelineLoadedMsg:
 		m.pipeline = (*apiclient.PipelineView)(msg)
 		m.rebuildPipelineTable()
+		return m, nil
+
+	case catalogLoadedMsg:
+		if msg.err != nil {
+			m.setFlash("catalog fetch failed: " + msg.err.Error())
+			return m, nil
+		}
+		m.catalog = msg.catalog
+		m.rebuildCatalogTable()
 		return m, nil
 
 	case snapshotLoadedMsg:
@@ -879,6 +918,15 @@ func (m *model) View() string {
 		}
 		title = fmt.Sprintf("abctl · pipeline · %s", name)
 		body = m.detailVp.View()
+	case paneCatalog:
+		title = fmt.Sprintf("abctl · %s · catalog", m.endpoint)
+		if m.catalog == nil {
+			body = styleHint.Render("(loading catalog…)")
+		} else if len(m.catalog.Plugins) == 0 {
+			body = styleHint.Render("(no registered plugins reported by /v1/plugins)")
+		} else {
+			body = m.catalogTbl.View()
+		}
 	}
 
 	header := styleTitle.Render(title)

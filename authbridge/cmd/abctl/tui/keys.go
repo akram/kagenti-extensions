@@ -141,13 +141,28 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 
 	case "esc", "left", "h":
-		// Back-out: plugin-detail → pipeline; detail → events; events → sessions.
+		// Back-out: plugin-detail → pipeline (or catalog if we came from
+		// there); detail → events; events → sessions; catalog → previous.
 		// In picker mode, the top-level session tabs (paneSessions and
 		// panePipeline are siblings) back out further to the Pods picker,
 		// tearing down PF + SSE.
 		switch m.pane {
 		case panePluginDetail:
-			m.pane = panePipeline
+			// Return to whichever pane invoked the detail (Pipeline or Catalog).
+			if m.previousPane == paneCatalog {
+				m.pane = paneCatalog
+				m.previousPane = 0
+			} else {
+				m.pane = panePipeline
+			}
+		case paneCatalog:
+			// Return to whichever pane the user pressed P from.
+			if m.previousPane != 0 {
+				m.pane = m.previousPane
+				m.previousPane = 0
+			} else {
+				m.pane = panePipeline
+			}
 		case paneDetail:
 			m.pane = paneEvents
 		case paneEvents:
@@ -187,6 +202,16 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			if p == nil {
 				return nil
 			}
+			m.previousPane = panePipeline
+			m.showPluginDetail(p)
+			m.pane = panePluginDetail
+			return nil
+		case paneCatalog:
+			p := m.selectedCatalogEntry()
+			if p == nil {
+				return nil
+			}
+			m.previousPane = paneCatalog
 			m.showPluginDetail(p)
 			m.pane = panePluginDetail
 			return nil
@@ -232,6 +257,27 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.goBottom()
 		return nil
 
+	case "P":
+		// Open the registered-plugin catalog. Available from any
+		// session-view pane; in --endpoint mode the picker fields
+		// don't matter — the catalog comes via the same /v1/* endpoint
+		// abctl is already pointed at.
+		if m.client == nil {
+			return nil
+		}
+		switch m.pane {
+		case paneNamespaces, panePods:
+			return nil
+		}
+		m.previousPane = m.pane
+		m.pane = paneCatalog
+		// Fetch on first open; cached afterward (refresh via `r`).
+		if m.catalog == nil {
+			return m.loadCatalogCmd()
+		}
+		m.rebuildCatalogTable()
+		return nil
+
 		// Dispatch j/k/up/down to the active component's Update.
 	}
 
@@ -262,6 +308,16 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			}
 		}
 		return cmd
+	case paneCatalog:
+		// `r` here refreshes the catalog (in the catalog pane only — the
+		// top-level `r` is reserved for the picker). All other keys go to
+		// the table for navigation.
+		if msg.String() == "r" {
+			return m.loadCatalogCmd()
+		}
+		var cmd tea.Cmd
+		m.catalogTbl, cmd = m.catalogTbl.Update(msg)
+		return cmd
 	}
 	return nil
 }
@@ -280,6 +336,8 @@ func (m *model) refreshActivePane() {
 
 func (m *model) goTop() {
 	switch m.pane {
+	case paneCatalog:
+		m.catalogTbl.SetCursor(0)
 	case paneSessions:
 		m.sessionsTbl.SetCursor(0)
 	case paneEvents:
@@ -304,6 +362,10 @@ func (m *model) goBottom() {
 	case panePipeline:
 		if n := len(m.pipelineTbl.Rows()); n > 0 {
 			m.pipelineTbl.SetCursor(n - 1)
+		}
+	case paneCatalog:
+		if n := len(m.catalogTbl.Rows()); n > 0 {
+			m.catalogTbl.SetCursor(n - 1)
 		}
 	case paneDetail, panePluginDetail:
 		m.detailVp.GotoBottom()
@@ -360,6 +422,11 @@ func (m *model) helpView() string {
 		return base
 	case panePluginDetail:
 		return "[↑↓] scroll  [esc] back  [q] quit"
+	case paneCatalog:
+		if m.catalog == nil {
+			return "loading catalog…  [esc] back  [q] quit"
+		}
+		return "[↑↓] nav  [↵] plugin detail  [r] refresh  [esc] back  [q] quit"
 	}
 	return "[q] quit"
 }
