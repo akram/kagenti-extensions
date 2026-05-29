@@ -72,3 +72,22 @@ func TestPortForwarderBuildOnly(t *testing.T) {
 	// kubectl.
 	var _ PortForwarder = NewPortForwarder()
 }
+
+func TestKubectlPortForward_StatusEndpoint(t *testing.T) {
+	pf := &kubectlPortForward{port: 12345, statusPort: 12346}
+	want := "http://127.0.0.1:12346"
+	if got := pf.StatusEndpoint(); got != want {
+		t.Fatalf("StatusEndpoint: got %q want %q", got, want)
+	}
+	if got := pf.Endpoint(); got != "http://127.0.0.1:12345" {
+		t.Fatalf("Endpoint: got %q", got)
+	}
+}
+
+func TestPortForwarderInterfaceHasStatusEndpoint(t *testing.T) {
+	var _ interface {
+		Endpoint() string
+		StatusEndpoint() string
+		Close() error
+	} = (*kubectlPortForward)(nil)
+}

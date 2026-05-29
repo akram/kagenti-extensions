@@ -261,8 +261,9 @@ type fakePortForward struct {
 	parent   *fakePortForwarder
 }
 
-func (p *fakePortForward) Endpoint() string { return p.endpoint }
-func (p *fakePortForward) Close() error     { p.parent.closeCount++; return nil }
+func (p *fakePortForward) Endpoint() string       { return p.endpoint }
+func (p *fakePortForward) StatusEndpoint() string { return "" } // unused by current picker tests
+func (p *fakePortForward) Close() error           { p.parent.closeCount++; return nil }
 
 func TestPodEnterStartsPortForwardAndTransitions(t *testing.T) {
 	pf := &fakePortForwarder{endpoint: "http://127.0.0.1:60000"}

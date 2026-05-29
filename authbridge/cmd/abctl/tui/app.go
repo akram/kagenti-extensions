@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -14,11 +16,13 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"gopkg.in/yaml.v3"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/apiclient"
 	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
+	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/edit"
 )
 
 // Pane identifiers.
@@ -96,6 +100,58 @@ type portForwardReadyMsg struct {
 	pf       cluster.PortForward
 	endpoint string
 	err      error
+}
+
+// editorExitedMsg is sent by openEditorCmd when the user's $EDITOR
+// process exits. err is nil on a clean (0) exit. Carries gen so a
+// stale editor result from Edit 1 can't overwrite Edit 2's tempfile
+// processing.
+type editorExitedMsg struct {
+	gen int
+	err error
+}
+
+// genFetchedMsg / genAppliedMsg / genPolledMsg / genRolledBackMsg wrap
+// the upstream edit-package messages with the editState.generation
+// captured at Cmd-issue time. Handlers drop messages whose gen doesn't
+// match m.editState.generation, which prevents Edit 1's late results
+// from leaking onto Edit 2's overlay (and would otherwise be able to
+// trigger an unintended rollback).
+type genFetchedMsg struct {
+	gen int
+	edit.FetchedMsg
+}
+type genAppliedMsg struct {
+	gen int
+	edit.AppliedMsg
+}
+type genPolledMsg struct {
+	gen int
+	edit.PolledMsg
+}
+type genRolledBackMsg struct {
+	gen int
+	edit.RolledBackMsg
+}
+
+// withGen wraps a tea.Cmd to tag its result with the supplied gen.
+// Inspects the upstream msg type and rewrites it into the matching
+// generational wrapper. Unknown types pass through untouched.
+func withGen(gen int, c tea.Cmd) tea.Cmd {
+	return func() tea.Msg {
+		switch m := c().(type) {
+		case edit.FetchedMsg:
+			return genFetchedMsg{gen: gen, FetchedMsg: m}
+		case edit.AppliedMsg:
+			return genAppliedMsg{gen: gen, AppliedMsg: m}
+		case edit.PolledMsg:
+			return genPolledMsg{gen: gen, PolledMsg: m}
+		case edit.RolledBackMsg:
+			return genRolledBackMsg{gen: gen, RolledBackMsg: m}
+		default:
+			return m
+		}
+	}
 }
 
 // Model is the top-level Bubble Tea model.
@@ -191,6 +247,19 @@ type model struct {
 	// activePF is the live port-forward tunnel, if any. Closed on pod-switch
 	// or quit.
 	activePF cluster.PortForward
+
+	// editState tracks an in-flight pipeline edit (the "e" flow).
+	// editState.phase == editPhaseDone means no edit is active.
+	editState editState
+
+	// statusURL is the agent's :9093 stat-server URL via the picker's
+	// port-forward; populated by portForwardReadyMsg. Used by edit.PollCmd
+	// to watch /reload/status.
+	statusURL string
+
+	// editRunner is the kubectl Runner the edit flow uses for fetch/apply.
+	// Set in newPickerModel to edit.DefaultRunner; tests inject a stub.
+	editRunner edit.Runner
 }
 
 // New returns a fresh model pointed at the given client. ctx governs both
@@ -495,9 +564,172 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.activePF = msg.pf
 		m.endpoint = msg.endpoint
+		m.statusURL = msg.pf.StatusEndpoint()
 		m.client = apiclient.New(m.endpoint)
 		m.pane = paneSessions
 		return m, m.initSessionView()
+
+	case genFetchedMsg:
+		if msg.gen != m.editState.generation || m.editState.phase != editPhaseFetching {
+			return m, nil
+		}
+		if msg.Err != nil {
+			m.editState.phase = editPhaseError
+			m.editState.err = msg.Err.Error()
+			return m, nil
+		}
+		m.editState.fetched = msg.Fetched
+		m.editState.tempPath = msg.TempPath
+		m.editState.phase = editPhaseEditing
+		return m, openEditorCmd(m.editState.generation, msg.TempPath)
+
+	case editorExitedMsg:
+		if msg.gen != m.editState.generation || m.editState.phase != editPhaseEditing || m.editState.fetched == nil {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.editState.phase = editPhaseError
+			m.editState.err = "editor exited: " + msg.err.Error()
+			return m, nil
+		}
+		edited, err := os.ReadFile(m.editState.tempPath)
+		if err != nil {
+			m.editState.phase = editPhaseError
+			m.editState.err = "read edited file: " + err.Error()
+			return m, nil
+		}
+		// Fix 2: reject empty input before it can silently wipe the pipeline.
+		if len(bytes.TrimSpace(edited)) == 0 {
+			m.editState.phase = editPhaseError
+			m.editState.err = "edited file is empty; press [Esc] to abort"
+			return m, nil
+		}
+		// Fix 1: normalize trailing newline so Splice doesn't concatenate the
+		// last edit line with the next top-level YAML key.
+		if len(edited) > 0 && edited[len(edited)-1] != '\n' {
+			edited = append(edited, '\n')
+		}
+		m.editState.editedRaw = edited
+		originalSubtree := m.editState.fetched.InnerYAML[m.editState.fetched.PipelineStart:m.editState.fetched.PipelineEnd]
+		// Fix 3: surface "no changes" rather than silently transitioning to done.
+		if string(edited) == string(originalSubtree) {
+			m.setFlash("no changes; nothing to apply")
+			m.editState = editState{phase: editPhaseDone}
+			return m, nil
+		}
+		// Fix 4: preserve YAML parse error line/col for the overlay.
+		var yamlVal any
+		if err := yaml.Unmarshal(edited, &yamlVal); err != nil {
+			m.editState.phase = editPhaseError
+			m.editState.err = "invalid YAML: " + err.Error()
+			return m, nil
+		}
+		m.editState.diff = edit.Diff(originalSubtree, edited)
+		m.editState.phase = editPhaseDiff
+		return m, nil
+
+	case genAppliedMsg:
+		// Drop stale or aborted-edit AppliedMsg deliveries.
+		if msg.gen != m.editState.generation || m.editState.phase != editPhaseApplying {
+			return m, nil
+		}
+		if msg.Err != nil {
+			m.editState.phase = editPhaseError
+			m.editState.err = "apply failed: " + msg.Err.Error()
+			return m, nil
+		}
+		m.editState.applyTime = msg.ApplyTime
+		m.editState.phase = editPhaseWaiting
+		return m, withGen(m.editState.generation, edit.PollCmd(m.ctx, m.statusURL, msg.ApplyTime))
+
+	case genPolledMsg:
+		// Drop stale (different gen), fully-aborted (phase=Done), or
+		// out-of-state-machine deliveries. fetched can be nil in those
+		// cases; both Waiting (overlay) and Background (footer flash)
+		// are valid targets for an in-flight watch.
+		if msg.gen != m.editState.generation ||
+			(m.editState.phase != editPhaseWaiting && m.editState.phase != editPhaseBackground) ||
+			m.editState.fetched == nil {
+			return m, nil
+		}
+		bg := m.editState.phase == editPhaseBackground
+		switch msg.Result.Status {
+		case edit.PollSuccess:
+			if bg {
+				m.setFlash("hot-reload succeeded")
+			}
+			m.editState = editState{phase: editPhaseDone}
+			return m, m.loadPipelineCmd()
+		case edit.PollFailure, edit.PollTimeout:
+			// In-pod reload didn't take. The running pipeline is still
+			// the previous one; reconcile the ConfigMap back to match.
+			//
+			// Caveat: the rollback bytes come from m.editState.fetched —
+			// captured at this edit's Fetch time. With Apply's
+			// --force-conflicts=true and field-manager=abctl, if a third
+			// party (operator reconcile, kubectl edit, kustomize) modified
+			// the ConfigMap between our forward apply and this rollback,
+			// our rollback silently reverts their change too. This is not
+			// a true undo. The framework's running pipeline is unaffected
+			// (build failure → keeps the previous in-memory pipeline), but
+			// the on-disk ConfigMap can lose third-party state. Surfacing
+			// a "third-party change detected" path is a future option.
+			reason := msg.Result.LastError
+			if msg.Result.Status == edit.PollTimeout {
+				reason = "reload not observed in 120s"
+			}
+			origManifest, mErr := edit.BuildManifest(
+				m.editState.fetched.ConfigMapYAML,
+				m.editState.fetched.InnerYAML,
+			)
+			if mErr != nil {
+				if bg {
+					m.setFlash("hot-reload failed: " + reason + "; rollback build failed too")
+					m.editState = editState{phase: editPhaseDone}
+					return m, nil
+				}
+				m.editState.phase = editPhaseError
+				m.editState.err = "reload failed: " + reason +
+					"\n(rollback build failed: " + mErr.Error() + ")"
+				return m, nil
+			}
+			// Stay backgrounded if user already Esc'd.
+			if bg {
+				m.editState.phase = editPhaseBackground
+			} else {
+				m.editState.phase = editPhaseRollback
+			}
+			return m, withGen(m.editState.generation, edit.RollbackCmd(m.ctx, m.editRunner, origManifest, reason))
+		}
+		return m, nil
+
+	case genRolledBackMsg:
+		if msg.gen != m.editState.generation ||
+			(m.editState.phase != editPhaseRollback && m.editState.phase != editPhaseBackground) {
+			return m, nil
+		}
+		bg := m.editState.phase == editPhaseBackground
+		if bg {
+			if msg.Err != nil {
+				m.setFlash("hot-reload failed: " + msg.ReloadErr +
+					"; rollback failed: " + msg.Err.Error())
+			} else {
+				m.setFlash("hot-reload failed: " + msg.ReloadErr +
+					"; rolled back to previous ConfigMap")
+			}
+			m.editState = editState{phase: editPhaseDone}
+			return m, nil
+		}
+		m.editState.phase = editPhaseError
+		if msg.Err != nil {
+			m.editState.err = "reload failed: " + msg.ReloadErr +
+				"\nrollback also failed: " + msg.Err.Error() +
+				"\nConfigMap and running pipeline are out of sync; check kubectl"
+			return m, nil
+		}
+		m.editState.err = "reload failed: " + msg.ReloadErr +
+			"\nrolled back to previous ConfigMap"
+		return m, nil
 
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
@@ -573,6 +805,13 @@ sortAndRebuild:
 
 // View composes the full screen.
 func (m *model) View() string {
+	// Edit overlay takes over the screen while an edit is in flight.
+	// editPhaseBackground intentionally falls through — the user backed
+	// out and wants the normal UI back; flash messages handle reporting.
+	if m.editState.phase != editPhaseDone && m.editState.phase != editPhaseBackground {
+		return renderEditOverlay(m.editState, m.width, m.height)
+	}
+
 	if m.pane == paneNamespaces {
 		title := "abctl · pick namespace"
 		// m.namespaces == nil → still loading (don't flash the empty-state
@@ -752,4 +991,19 @@ func Run(ctx context.Context, opts RunOptions) error {
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
+}
+
+// openEditorCmd returns a tea.Cmd that suspends bubbletea, runs $EDITOR
+// (vi if unset) on path, and emits editorExitedMsg when the editor exits.
+// gen is captured at call time so the handler can detect a stale exit
+// from an aborted-then-restarted edit.
+func openEditorCmd(gen int, path string) tea.Cmd {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+	c := exec.Command("sh", "-c", editor+" "+path)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return editorExitedMsg{gen: gen, err: err}
+	})
 }
