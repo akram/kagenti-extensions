@@ -149,6 +149,34 @@ func BuildManifest(origCMYAML, newInner []byte) ([]byte, error) {
 	configValueNode.Style = yaml.LiteralStyle
 	configValueNode.Value = string(newInner)
 
+	// Strip server-managed metadata fields. Including a stale
+	// resourceVersion turns a server-side apply into a 409 ("object has
+	// been modified") whenever any controller has touched the CM since
+	// our Fetch. uid / creationTimestamp / managedFields / generation
+	// must not flow back either; SSA reconstructs them server-side.
+	for i := 0; i < len(doc.Content); i += 2 {
+		if doc.Content[i].Value != "metadata" {
+			continue
+		}
+		md := doc.Content[i+1]
+		if md.Kind != yaml.MappingNode {
+			break
+		}
+		stripped := md.Content[:0]
+		for j := 0; j < len(md.Content); j += 2 {
+			k := md.Content[j].Value
+			switch k {
+			case "resourceVersion", "uid", "creationTimestamp",
+				"managedFields", "generation", "selfLink":
+				// drop both the key and the value
+				continue
+			}
+			stripped = append(stripped, md.Content[j], md.Content[j+1])
+		}
+		md.Content = stripped
+		break
+	}
+
 	out, err := yaml.Marshal(&root)
 	if err != nil {
 		return nil, fmt.Errorf("emit ConfigMap manifest: %w", err)

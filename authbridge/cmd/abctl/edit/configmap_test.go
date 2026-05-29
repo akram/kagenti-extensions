@@ -317,6 +317,40 @@ session:
 	}
 }
 
+func TestBuildManifest_StripsServerManagedMetadata(t *testing.T) {
+	const fetched = `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authbridge-config-email-agent
+  namespace: team1
+  resourceVersion: "12345"
+  uid: abc-123
+  creationTimestamp: "2026-05-29T00:00:00Z"
+  generation: 7
+  managedFields:
+    - manager: kagenti-webhook
+      operation: Apply
+data:
+  config.yaml: |
+    pipeline:
+      inbound:
+        - name: jwt-validation
+`
+	out, err := BuildManifest([]byte(fetched), []byte("pipeline:\n  inbound:\n    - name: jwt-validation\n"))
+	if err != nil {
+		t.Fatalf("BuildManifest: %v", err)
+	}
+	outS := string(out)
+	for _, drop := range []string{"resourceVersion", "uid:", "creationTimestamp", "managedFields", "generation:"} {
+		if strings.Contains(outS, drop) {
+			t.Fatalf("manifest should not contain %q (would break SSA):\n%s", drop, outS)
+		}
+	}
+	if !strings.Contains(outS, "name: authbridge-config-email-agent") || !strings.Contains(outS, "namespace: team1") {
+		t.Fatalf("manifest lost name/namespace:\n%s", outS)
+	}
+}
+
 func TestResolveAgentName_FromLabel(t *testing.T) {
 	stub := func(ctx context.Context, args ...string) ([]byte, error) {
 		if len(args) < 2 || args[0] != "get" || args[1] != "pod" {
