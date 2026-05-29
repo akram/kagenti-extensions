@@ -712,3 +712,54 @@ func TestCatalog_FactoryInvariant(t *testing.T) {
 		})
 	}
 }
+
+// TestCatalog_ReturnsDefensiveCopy verifies callers can mutate the
+// returned slice (and its nested capability slices) without tainting
+// the cached snapshot or future Catalog() reads.
+func TestCatalog_ReturnsDefensiveCopy(t *testing.T) {
+	resetCatalogCache()
+	t.Cleanup(resetCatalogCache)
+	const name = "test-defensive-copy"
+	RegisterPlugin(name, func() pipeline.Plugin {
+		return &relPlugin{name: name, caps: pipeline.PluginCapabilities{
+			Writes: []string{"slot-a"},
+		}}
+	})
+	t.Cleanup(func() { UnregisterPlugin(name) })
+
+	first := Catalog()
+	// Find our entry.
+	var idx int = -1
+	for i, e := range first {
+		if e.Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatal("seeded plugin missing from Catalog")
+	}
+
+	// Mutate the returned slice and the nested Writes slice.
+	first[idx].Capabilities.Writes[0] = "MUTATED"
+	first[idx].Capabilities.Description = "MUTATED"
+
+	// A second call must still see the original values.
+	second := Catalog()
+	var idx2 int = -1
+	for i, e := range second {
+		if e.Name == name {
+			idx2 = i
+			break
+		}
+	}
+	if idx2 < 0 {
+		t.Fatal("seeded plugin missing from second Catalog call")
+	}
+	if got := second[idx2].Capabilities.Writes[0]; got != "slot-a" {
+		t.Errorf("cache tainted by caller mutation: Writes[0] = %q, want slot-a", got)
+	}
+	if got := second[idx2].Capabilities.Description; got != "" {
+		t.Errorf("cache tainted by caller mutation: Description = %q, want empty", got)
+	}
+}

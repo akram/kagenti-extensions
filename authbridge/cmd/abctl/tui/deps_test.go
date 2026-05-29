@@ -116,3 +116,19 @@ func TestUnmetDepsCount_Two(t *testing.T) {
 		t.Fatalf("unmetDepsCount = %d, want 2", got)
 	}
 }
+
+// TestPluginDepsAllSatisfied_RequiresAnyMisorderOnAlternate locks the
+// stricter semantics: when one RequiresAny target is upstream (good)
+// but ANOTHER named target is downstream (misorder), the overall
+// result is NOT satisfied. Earlier this incorrectly returned true.
+func TestPluginDepsAllSatisfied_RequiresAnyMisorderOnAlternate(t *testing.T) {
+	chain := []apiclient.PipelinePlugin{
+		{Name: "a", Direction: "outbound", Position: 1},
+		{Name: "c", Direction: "outbound", Position: 2,
+			RequiresAny: []string{"a", "b"}},
+		{Name: "b", Direction: "outbound", Position: 3},
+	}
+	if pluginDepsAllSatisfied(&chain[1], chain) {
+		t.Fatal("RequiresAny should NOT be satisfied when an alternative is downstream")
+	}
+}

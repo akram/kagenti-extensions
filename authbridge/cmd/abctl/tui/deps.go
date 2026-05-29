@@ -52,23 +52,32 @@ func requiresStatus(p *apiclient.PipelinePlugin, chain []apiclient.PipelinePlugi
 	return out
 }
 
-// requiresAnyOK returns true iff at least one of p.RequiresAny appears
-// at a lower position. The framework's validateRelationships also
-// requires that EVERY listed name that IS present must be earlier;
-// this convenience returns just the at-least-one bit. The detail pane
-// renders the per-name breakdown alongside.
+// requiresAnyOK matches the framework's validateRelationships rule
+// exactly: at least one named plugin must be present upstream, AND
+// every name that IS present must be earlier (a downstream presence
+// is a misorder). Earlier this returned true on at-least-one-upstream
+// without checking the misorder condition, which let the Pipeline
+// pane's DEPS column show ✓ for chains the framework would reject.
 func requiresAnyOK(p *apiclient.PipelinePlugin, chain []apiclient.PipelinePlugin) bool {
 	if len(p.RequiresAny) == 0 {
 		return true
 	}
+	anyUpstream := false
 	for _, name := range p.RequiresAny {
 		for _, q := range chain {
-			if q.Name == name && q.Position < p.Position {
-				return true
+			if q.Name != name {
+				continue
 			}
+			if q.Position < p.Position {
+				anyUpstream = true
+			} else if q.Position > p.Position {
+				// Present-but-downstream violates the ordering rule.
+				return false
+			}
+			break
 		}
 	}
-	return false
+	return anyUpstream
 }
 
 // requiresAnyStatus returns one depCheck per entry in p.RequiresAny.

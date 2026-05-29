@@ -347,6 +347,12 @@ func (m *model) backToPodsPane() {
 	m.rate = 0
 	m.drops = 0
 	m.pipeline = nil
+	// Drop the cached /v1/plugins snapshot too — a different pod is a
+	// different framework instance with potentially different plugin
+	// versions registered. The next `P` press refetches.
+	m.catalog = nil
+	m.catalogTbl.SetRows(nil)
+	m.previousPane = paneNone
 	m.detailEvent = nil
 	m.detailPlugin = nil
 	m.selectedSess = ""

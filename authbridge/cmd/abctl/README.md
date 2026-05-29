@@ -144,7 +144,7 @@ checks the framework runs at reload-time, against the cached
 in ~50ms instead of waiting through the kubelet sync (~60s) to
 discover them at hot-reload:
 
-```
+```text
 ⚠ 1 validation issue — framework reload will reject:
   • [outbound] ibac pos 1: Requires "mcp-parser", but it is not in the outbound chain
 ```

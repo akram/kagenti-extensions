@@ -123,7 +123,7 @@ var (
 func Catalog() []CatalogEntry {
 	catalogCacheMu.RLock()
 	if catalogCacheVal != nil {
-		out := catalogCacheVal
+		out := cloneCatalog(catalogCacheVal)
 		catalogCacheMu.RUnlock()
 		return out
 	}
@@ -132,7 +132,7 @@ func Catalog() []CatalogEntry {
 	catalogCacheMu.Lock()
 	defer catalogCacheMu.Unlock()
 	if catalogCacheVal != nil { // double-check under write lock
-		return catalogCacheVal
+		return cloneCatalog(catalogCacheVal)
 	}
 
 	registryMu.RLock()
@@ -146,6 +146,37 @@ func Catalog() []CatalogEntry {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	catalogCacheVal = out
+	return cloneCatalog(out)
+}
+
+// cloneCatalog returns a deep copy of in: each CatalogEntry is copied
+// and every []string field on its Capabilities is freshly allocated.
+// Catalog returns a clone so callers can mutate the slice (sort, filter,
+// extend per-entry slices) without tainting the cached snapshot — and
+// without that tainted view leaking into future /v1/plugins responses.
+func cloneCatalog(in []CatalogEntry) []CatalogEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]CatalogEntry, len(in))
+	for i := range in {
+		caps := in[i].Capabilities
+		out[i] = CatalogEntry{
+			Name: in[i].Name,
+			Capabilities: pipeline.PluginCapabilities{
+				ReadsBody:   caps.ReadsBody,
+				WritesBody:  caps.WritesBody,
+				BodyAccess:  caps.BodyAccess,
+				Description: caps.Description,
+				Writes:      append([]string(nil), caps.Writes...),
+				Reads:       append([]string(nil), caps.Reads...),
+				Requires:    append([]string(nil), caps.Requires...),
+				RequiresAny: append([]string(nil), caps.RequiresAny...),
+				After:       append([]string(nil), caps.After...),
+				Claims:      append([]string(nil), caps.Claims...),
+			},
+		}
+	}
 	return out
 }
 
