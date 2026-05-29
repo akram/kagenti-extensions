@@ -184,8 +184,9 @@ func (p *IBAC) Capabilities() pipeline.PluginCapabilities {
 		// IBAC must come after so it can read the parsed tool name
 		// and args. If it's absent, IBAC still functions on raw
 		// HTTP — the judge sees method+host+path+body excerpt.
-		After:     []string{"mcp-parser"},
-		ReadsBody: true,
+		After:       []string{"mcp-parser"},
+		ReadsBody:   true,
+		Description: "LLM-judge intent-based access control for outbound tool calls.",
 	}
 }
 

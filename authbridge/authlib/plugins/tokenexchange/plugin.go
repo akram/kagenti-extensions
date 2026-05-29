@@ -273,7 +273,9 @@ func init() {
 func (p *TokenExchange) Name() string { return "token-exchange" }
 
 func (p *TokenExchange) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{}
+	return pipeline.PluginCapabilities{
+		Description: "RFC 8693 outbound token exchange against Keycloak per route.",
+	}
 }
 
 func (p *TokenExchange) Configure(raw json.RawMessage) error {

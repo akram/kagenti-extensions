@@ -26,8 +26,9 @@ func (p *A2AParser) Name() string { return "a2a-parser" }
 
 func (p *A2AParser) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		Writes:    []string{"a2a"},
-		ReadsBody: true,
+		Writes:      []string{"a2a"},
+		ReadsBody:   true,
+		Description: "Parses A2A messages into pctx.Extensions.A2A for downstream plugins.",
 	}
 }
 

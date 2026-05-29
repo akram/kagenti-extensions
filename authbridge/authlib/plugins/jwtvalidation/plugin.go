@@ -209,7 +209,10 @@ func init() {
 func (p *JWTValidation) Name() string { return "jwt-validation" }
 
 func (p *JWTValidation) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{Writes: []string{"security"}}
+	return pipeline.PluginCapabilities{
+		Writes:      []string{"security"},
+		Description: "Inbound JWT validation (signature, issuer, audience) against JWKS.",
+	}
 }
 
 // Configure decodes the plugin's config subtree, applies defaults,

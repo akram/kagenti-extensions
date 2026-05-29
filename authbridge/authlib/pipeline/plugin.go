@@ -95,6 +95,19 @@ type PluginCapabilities struct {
 	// list." See authlib/contracts/claims.go for the canonical
 	// vocabulary.
 	Claims []string
+
+	// Description is operator-facing prose, one line, ≤80 chars,
+	// describing what this plugin does. Surfaces in `abctl`'s
+	// plugin-detail and catalog panes, and in /v1/plugins. Empty for
+	// plugins that haven't opted in; new plugins should populate it.
+	//
+	// Capabilities are static type-level metadata: Capabilities() must
+	// return the same value for any instance produced by a given
+	// factory. The catalog endpoint relies on this — varying capabilities
+	// by instance state silently produces wrong catalog entries. If a
+	// plugin's behavior varies enough that its capabilities differ,
+	// register it under multiple names.
+	Description string
 }
 
 // Normalize applies compatibility rules to a PluginCapabilities:
