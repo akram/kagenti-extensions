@@ -420,9 +420,11 @@ func TestOnRequest_NilSession_PolicyAllow_Bypasses(t *testing.T) {
 }
 
 // MCP protocol-housekeeping methods carry no user-actionable intent
-// (they're connection setup or capability discovery, not side
-// effects). IBAC must skip them; otherwise every agent that opens an
-// MCP connection at startup gets blocked before any user turn.
+// (they're connection setup, capability discovery, or subscription
+// management — not side effects). IBAC must skip them; otherwise
+// every agent that opens an MCP connection at startup gets blocked
+// before any user turn, and any agent that maintains resource
+// subscriptions sees its bookkeeping calls denied mid-conversation.
 func TestOnRequest_MCPHousekeepingBypass(t *testing.T) {
 	cases := []string{
 		"initialize",
@@ -431,6 +433,8 @@ func TestOnRequest_MCPHousekeepingBypass(t *testing.T) {
 		"prompts/list",
 		"resources/list",
 		"resources/templates/list",
+		"resources/subscribe",
+		"resources/unsubscribe",
 		"completion/complete",
 		"logging/setLevel",
 		"notifications/initialized",

@@ -585,13 +585,21 @@ func formatBodyExcerpt(body []byte, n int) string {
 	return fmt.Sprintf("%q", string(body))
 }
 
-// isMCPHousekeeping reports whether an MCP method is connection-setup
-// or capability-discovery traffic that carries no user-actionable
-// intent. These methods fire before any user turn (e.g. an agent's
-// startup `initialize` against its MCP tool server) and judging them
-// would either panic on a nil session or deny on no_intent — both
-// break agents that open MCP connections at startup. Only side-effect
-// methods (tools/call, prompts/get, resources/read) reach the judge.
+// isMCPHousekeeping reports whether an MCP method is connection-setup,
+// capability-discovery, or subscription-management traffic that
+// carries no user-actionable intent. These methods fire before, after,
+// or alongside user turns as protocol mechanics — judging them would
+// either panic on a nil session or deny on no_intent, breaking agents
+// that open MCP connections at startup or maintain resource
+// subscriptions. Only side-effect methods (tools/call, prompts/get,
+// resources/read) reach the judge.
+//
+// resources/subscribe and resources/unsubscribe are subscription-
+// state management — the client tells the server "notify me when
+// this resource changes" / "stop notifying me." They go through POST
+// with a JSON-RPC body (so the body-less transport_stream bypass
+// doesn't apply), but they're conceptually identical to *list calls:
+// protocol bookkeeping, not user-meaningful actions.
 //
 // JSON-RPC notifications (any method starting with `notifications/`)
 // are also bypassed: they're one-way protocol signals, never tied to
@@ -604,6 +612,8 @@ func isMCPHousekeeping(method string) bool {
 		"prompts/list",
 		"resources/list",
 		"resources/templates/list",
+		"resources/subscribe",
+		"resources/unsubscribe",
 		"completion/complete",
 		"logging/setLevel":
 		return true
