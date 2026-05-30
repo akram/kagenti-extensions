@@ -82,6 +82,15 @@ func invokeOnRequest(p pipeline.Plugin, pctx *pipeline.Context) pipeline.Action 
 // model: IBAC only judges traffic some parser classified as an
 // action. Tests that want to verify pass-through (no classification)
 // behavior explicitly set pctx.Extensions.MCP = nil.
+//
+// CONTRACT CHANGE NOTE. Before the parser-classification refactor,
+// makePCtx populated no protocol extension and tests had to opt IN
+// by setting pctx.Extensions.MCP/A2A/Inference when they wanted IBAC
+// to judge. After the refactor, makePCtx populates an action-
+// classified MCPExtension by default and tests opt OUT (set
+// Extensions.MCP = nil) when they want to verify pass-through. The
+// flip matches IBAC's new defense-in-depth posture: classified
+// traffic is the judged path; unclassified is pass-through.
 func makePCtx(t *testing.T) *pipeline.Context {
 	t.Helper()
 	view := &pipeline.SessionView{

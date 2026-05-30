@@ -15,10 +15,15 @@ import (
 
 // Synthetic method names emitted on body-less MCP transport-layer
 // requests where there's no JSON-RPC method on the wire to report.
-// The "$" prefix is reserved (real MCP methods follow a category/
-// action naming convention with no "$"), so operators reading abctl
-// can tell at a glance these aren't methods that appeared in the
-// request body.
+//
+// The "$" prefix is non-standard — neither MCP nor JSON-RPC 2.0
+// formally reserves it (JSON-RPC 2.0 §6 only reserves "rpc.*").
+// We chose it because no current MCP spec method uses "$" and
+// because it's visually distinct from real category/action method
+// names; operators reading abctl can tell at a glance that these
+// aren't methods that appeared in the request body. If a future MCP
+// revision starts using "$" prefixes, switch this scheme to a less
+// likely sentinel (e.g. "_transport/stream") at that time.
 const (
 	syntheticTransportStream    = "$transport/stream"
 	syntheticTransportTerminate = "$transport/terminate"
@@ -117,6 +122,13 @@ func (p *MCPParser) Configure(raw json.RawMessage) error {
 // — protocol setup, capability discovery, subscription management,
 // notifications, etc. — is treated as protocol mechanics with
 // IsAction=false (the zero value).
+//
+// Aligned with MCP spec revision 2025-03-26 (Streamable HTTP). When
+// MCP adds a new action-shaped method (a hypothetical
+// "tools/execute_remote", a "prompts/render_with_data", etc.), update
+// this list. The audit anchor is the spec-revision string so future
+// maintainers have a date to compare against rather than re-deriving
+// the action set from scratch.
 func isMCPAction(method string) bool {
 	switch method {
 	case "tools/call", "prompts/get", "resources/read":

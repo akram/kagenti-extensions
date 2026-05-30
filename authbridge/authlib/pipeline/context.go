@@ -488,12 +488,30 @@ func (c *Context) ContentSources() []contracts.ContentSource {
 // unclassified — guardrails treating IBAC-style defense in depth (only
 // fire on traffic a parser claimed) should pass through.
 //
-// The two booleans are independent because in principle a single request
-// could populate multiple extensions; today this is rare, but if e.g. a
-// future hybrid transport carried both an MCP envelope and an inference
-// payload, the request might be classified as both action (judge it) and
-// bypass (skip it). Callers decide their own precedence — IBAC, for
-// instance, treats anyBypass as winning over anyAction (skip first).
+// Parser-disjointness assumption. The current in-tree parsers fire on
+// disjoint request shapes — mcp-parser on JSON-RPC bodies (or body-
+// less MCP-shaped requests on configured paths), a2a-parser on A2A
+// JSON-RPC bodies, inference-parser on /v1/{chat/,}completions paths
+// — so a single request typically populates at most one extension.
+// The aggregation above is defensive (handles the multi-extension
+// case if a future hybrid transport ever does double-claim), but
+// parser authors should not rely on the aggregation as a feature: a
+// parser that populates an extension on a request another parser
+// already classified breaks the contract that classification belongs
+// to whichever parser owns the wire shape.
+//
+// Conflict resolution. If anyAction && anyBypass both end up true,
+// callers decide their own precedence:
+//
+//   - Defense-in-depth gates (IBAC, rate limiters): treat anyBypass
+//     as winning — skip first. Safer default when you can't tell who
+//     to trust.
+//   - Audit-style guardrails: probably want to log the action even
+//     if some extension said bypass; flip the precedence.
+//
+// Either choice is valid; the contract here just provides both signals.
+// In practice the question rarely comes up because of the disjointness
+// above.
 func (c *Context) Classification() (anyAction, anyBypass bool) {
 	if ext := c.Extensions.MCP; ext != nil {
 		if ext.IsAction {
