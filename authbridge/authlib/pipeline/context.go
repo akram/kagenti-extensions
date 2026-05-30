@@ -476,6 +476,49 @@ func (c *Context) ContentSources() []contracts.ContentSource {
 	return out
 }
 
+// Classification reports the request's protocol classification, aggregated
+// across every populated protocol extension on Extensions:
+//
+//   - anyAction is true if at least one populated extension has IsAction=true
+//     (e.g. mcp-parser saw "tools/call"; inference-parser saw any inference call).
+//   - anyBypass is true if at least one populated extension has IsAction=false
+//     (e.g. mcp-parser saw "tools/list" or a $transport/* synthetic event).
+//
+// Both false means no parser populated anything and the request is
+// unclassified — guardrails treating IBAC-style defense in depth (only
+// fire on traffic a parser claimed) should pass through.
+//
+// The two booleans are independent because in principle a single request
+// could populate multiple extensions; today this is rare, but if e.g. a
+// future hybrid transport carried both an MCP envelope and an inference
+// payload, the request might be classified as both action (judge it) and
+// bypass (skip it). Callers decide their own precedence — IBAC, for
+// instance, treats anyBypass as winning over anyAction (skip first).
+func (c *Context) Classification() (anyAction, anyBypass bool) {
+	if ext := c.Extensions.MCP; ext != nil {
+		if ext.IsAction {
+			anyAction = true
+		} else {
+			anyBypass = true
+		}
+	}
+	if ext := c.Extensions.A2A; ext != nil {
+		if ext.IsAction {
+			anyAction = true
+		} else {
+			anyBypass = true
+		}
+	}
+	if ext := c.Extensions.Inference; ext != nil {
+		if ext.IsAction {
+			anyAction = true
+		} else {
+			anyBypass = true
+		}
+	}
+	return anyAction, anyBypass
+}
+
 // emitBodyMutation records the Invocation and publishes the
 // plugin-public event carrying length delta + sha256 before/after.
 // Never logs raw body bytes — the session store is unauthenticated.
