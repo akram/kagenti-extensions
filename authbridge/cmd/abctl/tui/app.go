@@ -633,6 +633,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editState.fetched = msg.Fetched
 		m.editState.tempPath = msg.TempPath
 		m.editState.phase = editPhaseEditing
+		// FetchCmd may have fetched the catalog inline so it could
+		// render the templates section. Cache it so the catalog pane
+		// (P) and the post-save validator both reuse it without a
+		// second round-trip.
+		if msg.Catalog != nil {
+			m.catalog = msg.Catalog
+		}
 		return m, openEditorCmd(m.editState.generation, msg.TempPath)
 
 	case editorExitedMsg:

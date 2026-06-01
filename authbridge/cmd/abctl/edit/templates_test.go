@@ -2,6 +2,8 @@ package edit
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -120,7 +122,7 @@ func TestFetchCmd_AppendsTemplatesWhenCatalogProvided(t *testing.T) {
 	cat := []apiclient.PluginCatalogEntry{
 		{Name: "ibac", Description: "test plugin"},
 	}
-	cmd := FetchCmd(context.Background(), r, "team1", "email-agent", cat)
+	cmd := FetchCmd(context.Background(), r, nil, "team1", "email-agent", cat)
 	msg := cmd().(FetchedMsg)
 	if msg.Err != nil {
 		t.Fatalf("FetchCmd err: %v", msg.Err)
@@ -206,11 +208,65 @@ func TestStripTemplates_IntegratesWithRender(t *testing.T) {
 	}
 }
 
+func TestFetchCmd_FetchesCatalogInlineWhenCacheNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/plugins" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"plugins":[{"name":"fetched-from-stub"}]}`))
+	}))
+	defer srv.Close()
+	client := apiclient.New(srv.URL)
+	r := func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte(fixtureCMYAML), nil
+	}
+	cmd := FetchCmd(context.Background(), r, client, "team1", "email-agent", nil)
+	msg := cmd().(FetchedMsg)
+	if msg.Err != nil {
+		t.Fatalf("FetchCmd err: %v", msg.Err)
+	}
+	body, err := os.ReadFile(msg.TempPath)
+	if err != nil {
+		t.Fatalf("read tempfile: %v", err)
+	}
+	if !strings.Contains(string(body), "fetched-from-stub") {
+		t.Fatalf("inline-fetched catalog not rendered:\n%s", string(body))
+	}
+	if msg.Catalog == nil {
+		t.Fatal("FetchedMsg.Catalog should be set when fetched inline (so the TUI can cache it)")
+	}
+}
+
+func TestFetchCmd_FetcherErrorIsNonFatal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	client := apiclient.New(srv.URL)
+	r := func(_ context.Context, _ ...string) ([]byte, error) {
+		return []byte(fixtureCMYAML), nil
+	}
+	cmd := FetchCmd(context.Background(), r, client, "team1", "email-agent", nil)
+	msg := cmd().(FetchedMsg)
+	if msg.Err != nil {
+		t.Fatalf("catalog-fetch failure should not break edit: %v", msg.Err)
+	}
+	body, err := os.ReadFile(msg.TempPath)
+	if err != nil {
+		t.Fatalf("read tempfile: %v", err)
+	}
+	if strings.Contains(string(body), FenceMarker) {
+		t.Fatalf("templates should be absent when fetcher errored:\n%s", string(body))
+	}
+}
+
 func TestFetchCmd_NoTemplatesWhenCatalogNil(t *testing.T) {
 	r := func(_ context.Context, _ ...string) ([]byte, error) {
 		return []byte(fixtureCMYAML), nil
 	}
-	cmd := FetchCmd(context.Background(), r, "team1", "email-agent", nil)
+	cmd := FetchCmd(context.Background(), r, nil, "team1", "email-agent", nil)
 	msg := cmd().(FetchedMsg)
 	if msg.Err != nil {
 		t.Fatalf("FetchCmd err: %v", msg.Err)

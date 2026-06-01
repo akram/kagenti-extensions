@@ -260,7 +260,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		gen := m.editState.generation + 1
 		m.editState = editState{phase: editPhaseFetching, generation: gen}
-		return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod, catalogPlugins(m.catalog)))
+		return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.client, m.selectedNamespace, m.selectedPod, catalogPlugins(m.catalog)))
 
 	case "g":
 		m.goTop()
@@ -517,7 +517,7 @@ func (m *model) handleEditKey(msg tea.KeyMsg) tea.Cmd {
 			if m.editState.tempPath == "" {
 				gen := m.editState.generation + 1
 				m.editState = editState{phase: editPhaseFetching, generation: gen}
-				return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.selectedNamespace, m.selectedPod, catalogPlugins(m.catalog)))
+				return withGen(gen, edit.FetchCmd(m.ctx, m.editRunner, m.client, m.selectedNamespace, m.selectedPod, catalogPlugins(m.catalog)))
 			}
 			m.editState.phase = editPhaseEditing
 			return openEditorCmd(m.editState.generation, m.editState.tempPath)
