@@ -87,9 +87,13 @@ type FieldSchema struct {
 // inspected for type only, not for runtime field values.
 //
 // Returns nil if the argument isn't a struct (or pointer to struct).
-// Anonymous fields are flattened. Fields without a `json:` tag are
-// skipped — explicit JSON tagging is the existing wire convention,
-// and untagged fields don't appear in the operator-facing YAML.
+// Fields without a `json:` tag are skipped (including untagged
+// anonymous/embedded structs — unlike encoding/json, which promotes
+// them). Explicit JSON tagging is the existing wire convention, and
+// untagged fields don't appear in the operator-facing YAML, so they
+// have nothing to surface in the schema either. No current plugin
+// uses untagged embedding; if one ever needs that, this helper would
+// need to grow flattening support.
 func SchemaOf(configType any) []FieldSchema {
 	t := reflect.TypeOf(configType)
 	if t == nil {
@@ -136,8 +140,13 @@ func schemaOfType(t reflect.Type) []FieldSchema {
 			}
 		}
 		if schema.Type == "object" {
-			// Recurse one level. Operators rarely have deeply-nested
-			// configs; if the need arises later we can lift this guard.
+			// Recurse unboundedly. Plugin configs in practice nest at
+			// most one or two levels (e.g. tokenexchange's identity +
+			// routes blocks); pathological self-referential configs
+			// (a struct containing *Self) would loop, but no such
+			// shape exists today and the framework rejects exotic
+			// configs at decode time anyway. If a depth guard becomes
+			// necessary, this is the spot for it.
 			schema.Fields = schemaOfType(unwrap(f.Type))
 		}
 		out = append(out, schema)

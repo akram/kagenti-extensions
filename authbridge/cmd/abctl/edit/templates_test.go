@@ -271,6 +271,19 @@ func TestStripTemplates_TrimsWhitespaceOnlyLineBeforeFence(t *testing.T) {
 	}
 }
 
+func TestStripTemplates_TrimsCRLFBlankLineBeforeFence(t *testing.T) {
+	// An editor that normalizes line endings to CRLF on save would
+	// leave "\r\n" blank lines above the fence. Without the \r-aware
+	// blank check, those would survive the trim and break the
+	// byte-identical round-trip the PR is built around.
+	original := "pipeline: {}\n"
+	edited := []byte(original + "\r\n\r\n" + FenceMarker + "\n")
+	got := string(StripTemplates(edited))
+	if got != original {
+		t.Fatalf("CRLF blank line before fence should be stripped\nwant: %q\ngot:  %q", original, got)
+	}
+}
+
 func TestStripTemplates_NoFenceReturnsUnchanged(t *testing.T) {
 	in := []byte("pipeline:\n  inbound:\n    plugins: []\n")
 	got := StripTemplates(in)

@@ -333,9 +333,13 @@ func trimTrailingBlankLines(out []byte) []byte {
 	return out
 }
 
+// isBlankLine reports whether b contains only horizontal whitespace.
+// '\r' counts too: an editor that saves with CRLF line endings would
+// otherwise leave a stray "\r\n" line surviving the trim and break
+// the byte-identical round-trip on save-without-changes.
 func isBlankLine(b []byte) bool {
 	for _, c := range b {
-		if c != ' ' && c != '\t' {
+		if c != ' ' && c != '\t' && c != '\r' {
 			return false
 		}
 	}
