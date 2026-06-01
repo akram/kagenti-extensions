@@ -103,6 +103,65 @@ func TestRenderTemplates_AllOptionalShowsRequiredNoneHeader(t *testing.T) {
 	}
 }
 
+func TestRenderTemplates_HeaderListsNestedRequiredPaths(t *testing.T) {
+	cat := []apiclient.PluginCatalogEntry{
+		{
+			Name: "te",
+			Fields: []apiclient.PluginFieldEntry{
+				{Name: "token_url", Type: "string"},
+				{
+					Name: "identity", Type: "object",
+					Fields: []apiclient.PluginFieldEntry{
+						{Name: "type", Type: "string", Required: true},
+					},
+				},
+			},
+		},
+	}
+	out := string(RenderTemplates(cat))
+	if !strings.Contains(out, "# Required: identity.type") {
+		t.Fatalf("nested required field should appear in header as identity.type:\n%s", out)
+	}
+}
+
+func TestRenderTemplates_NestedObjectRecurses(t *testing.T) {
+	cat := []apiclient.PluginCatalogEntry{
+		{
+			Name: "te",
+			Fields: []apiclient.PluginFieldEntry{
+				{
+					Name:        "identity",
+					Type:        "object",
+					Description: "Client credentials.",
+					Fields: []apiclient.PluginFieldEntry{
+						{Name: "type", Type: "string", Required: true,
+							Enum:        []string{"spiffe", "client-secret"},
+							Description: "Identity scheme."},
+						{Name: "client_id", Type: "string",
+							Description: "Inline client id."},
+					},
+				},
+			},
+		},
+	}
+	out := string(RenderTemplates(cat))
+	if strings.Contains(out, "identity: {}") {
+		t.Errorf("nested object should NOT collapse to {}; got:\n%s", out)
+	}
+	if !strings.Contains(out, "identity:\n") {
+		t.Errorf("nested object should render `identity:` then sub-fields, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[REQUIRED] Identity scheme.") {
+		t.Errorf("nested required field annotation missing:\n%s", out)
+	}
+	// Nested fields should be indented further than the top-level
+	// config fields. Top-level uses "#           " (11 spaces);
+	// nested adds 2 more.
+	if !strings.Contains(out, "#             type:") {
+		t.Errorf("nested field should indent by 2 spaces beyond parent:\n%s", out)
+	}
+}
+
 func TestRenderTemplates_RequiredEnumShowsChoices(t *testing.T) {
 	cat := []apiclient.PluginCatalogEntry{
 		{

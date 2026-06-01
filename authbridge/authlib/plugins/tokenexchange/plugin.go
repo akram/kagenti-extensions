@@ -31,13 +31,13 @@ type tokenExchangeConfig struct {
 	// TokenURL is the OAuth token endpoint. Explicit value wins; else
 	// derived from KeycloakURL + KeycloakRealm using Keycloak's
 	// convention.
-	TokenURL string `json:"token_url" description:"OAuth token endpoint URL. Derived from keycloak_url+realm when empty."`
+	TokenURL string `json:"token_url" description:"OAuth token endpoint URL. Required unless keycloak_url + keycloak_realm are both set (the plugin derives token_url from the pair)."`
 
 	// KeycloakURL and KeycloakRealm are a convenience for deriving
 	// TokenURL when the operator prefers to supply Keycloak base + realm
 	// rather than the full token endpoint.
-	KeycloakURL   string `json:"keycloak_url" description:"Internal Keycloak base URL. Used to derive token_url when omitted."`
-	KeycloakRealm string `json:"keycloak_realm" description:"Keycloak realm name. Pairs with keycloak_url for token_url derivation."`
+	KeycloakURL   string `json:"keycloak_url" description:"Internal Keycloak base URL. Required (with keycloak_realm) when token_url is empty."`
+	KeycloakRealm string `json:"keycloak_realm" description:"Keycloak realm name. Required (with keycloak_url) when token_url is empty."`
 
 	// DefaultPolicy is applied when a request's host matches no route:
 	// "passthrough" (default) forwards the request unchanged;
@@ -69,7 +69,7 @@ type tokenExchangeConfig struct {
 
 type tokenExchangeIdentity struct {
 	// Type is one of "spiffe" or "client-secret".
-	Type string `json:"type" description:"Identity scheme: spiffe (JWT-SVID assertion) or client-secret." enum:"spiffe,client-secret"`
+	Type string `json:"type" required:"true" description:"Identity scheme: spiffe (JWT-SVID assertion) or client-secret." enum:"spiffe,client-secret"`
 
 	// ClientID identifies the client in Keycloak. Explicit value wins;
 	// else read from ClientIDFile at Configure time (or by Init if the
@@ -86,7 +86,7 @@ type tokenExchangeIdentity struct {
 	// the RFC 8693 client assertion. Required when Type=="spiffe";
 	// ignored otherwise. Lives on the plugin (not the framework spiffe
 	// block) because only the spiffe identity path consumes it.
-	JWTAudience string `json:"jwt_audience" description:"Audience claim minted on the JWT-SVID assertion. Required when type=spiffe."`
+	JWTAudience string `json:"jwt_audience" description:"Audience claim minted on the JWT-SVID assertion. REQUIRED when type=spiffe; ignored otherwise."`
 
 	// jwt_svid_path was historically a per-plugin path to the JWT-SVID
 	// file written by spiffe-helper. Removed in favor of injection via

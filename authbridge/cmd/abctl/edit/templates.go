@@ -64,10 +64,8 @@ func renderPluginTemplate(b *strings.Builder, p apiclient.PluginCatalogEntry) {
 		b.WriteString("\n")
 	}
 
-	// Split fields into required vs optional. Required render first so
-	// the operator's eye lands on must-fill slots; the "Required:" header
-	// is always emitted (even when none) so the answer is explicit
-	// rather than inferred from absence.
+	// Split top-level fields into required vs optional for ordering
+	// (required render first inside the config: block).
 	var required, optional []apiclient.PluginFieldEntry
 	for _, f := range p.Fields {
 		if f.Required {
@@ -76,16 +74,16 @@ func renderPluginTemplate(b *strings.Builder, p apiclient.PluginCatalogEntry) {
 			optional = append(optional, f)
 		}
 	}
+	// Header lists every required field anywhere in the schema —
+	// including nested sub-fields like identity.type — so operators
+	// see the full set of must-fill slots without having to skim
+	// the body looking for [REQUIRED] markers inside object blocks.
 	if len(p.Fields) > 0 {
 		b.WriteString("# Required: ")
-		if len(required) == 0 {
+		if reqPaths := collectRequiredPaths("", p.Fields); len(reqPaths) == 0 {
 			b.WriteString("(none — every field is optional)")
 		} else {
-			names := make([]string, len(required))
-			for i, f := range required {
-				names[i] = f.Name
-			}
-			b.WriteString(strings.Join(names, ", "))
+			b.WriteString(strings.Join(reqPaths, ", "))
 		}
 		b.WriteString("\n")
 	}
@@ -99,11 +97,33 @@ func renderPluginTemplate(b *strings.Builder, p apiclient.PluginCatalogEntry) {
 	}
 	b.WriteString("#         config:\n")
 	for _, f := range required {
-		renderField(b, f)
+		renderField(b, f, "           ")
 	}
 	for _, f := range optional {
-		renderField(b, f)
+		renderField(b, f, "           ")
 	}
+}
+
+// collectRequiredPaths walks the schema tree and returns dotted paths
+// for every required field. Top-level required fields appear as
+// `name`; nested ones as `parent.child` (e.g. `identity.type`). Used
+// by the per-plugin "Required:" header so operators see the full
+// must-fill set including ones buried inside object sub-trees.
+func collectRequiredPaths(prefix string, fields []apiclient.PluginFieldEntry) []string {
+	var out []string
+	for _, f := range fields {
+		path := f.Name
+		if prefix != "" {
+			path = prefix + "." + f.Name
+		}
+		if f.Required {
+			out = append(out, path)
+		}
+		if f.Type == "object" && len(f.Fields) > 0 {
+			out = append(out, collectRequiredPaths(path, f.Fields)...)
+		}
+	}
+	return out
 }
 
 // renderField emits two lines per field for readability:
@@ -116,11 +136,21 @@ func renderPluginTemplate(b *strings.Builder, p apiclient.PluginCatalogEntry) {
 //	#           # [optional, default=X, enum=a|b] <description>
 //	#           <name>: <placeholder>
 //
+// For nested struct fields with their own sub-fields, the placeholder
+// is replaced by a recursive block so operators see required nested
+// fields (e.g. identity.type) instead of a misleading "identity: {}".
+//
 // The bracket prefix scans at the left margin so the operator can tell
 // required from optional without parsing inline notes.
-func renderField(b *strings.Builder, f apiclient.PluginFieldEntry) {
+//
+// indent is the column-prefix for the value line (counted after the
+// leading "#"). The default value column is "           " (matching
+// "          config:"); recursive calls deepen by two spaces per level.
+func renderField(b *strings.Builder, f apiclient.PluginFieldEntry, indent string) {
 	// Annotation line.
-	b.WriteString("#           # ")
+	b.WriteString("#")
+	b.WriteString(indent)
+	b.WriteString("# ")
 	if f.Required {
 		b.WriteString("[REQUIRED]")
 	} else {
@@ -145,13 +175,43 @@ func renderField(b *strings.Builder, f apiclient.PluginFieldEntry) {
 	// Required field with an enum: still surface the choices, since
 	// they're constraint information, not a default note.
 	if f.Required && len(f.Enum) > 0 {
-		b.WriteString("#           #   choices: ")
+		b.WriteString("#")
+		b.WriteString(indent)
+		b.WriteString("#   choices: ")
 		b.WriteString(strings.Join(f.Enum, " | "))
 		b.WriteString("\n")
 	}
 
+	// Object field with sub-fields: render the sub-tree inline so
+	// nested required fields (e.g. identity.type) are visible.
+	if f.Type == "object" && len(f.Fields) > 0 {
+		b.WriteString("#")
+		b.WriteString(indent)
+		b.WriteString(f.Name)
+		b.WriteString(":\n")
+		// Reorder sub-fields so required render first within the
+		// nested block, matching top-level convention.
+		var req, opt []apiclient.PluginFieldEntry
+		for _, sf := range f.Fields {
+			if sf.Required {
+				req = append(req, sf)
+			} else {
+				opt = append(opt, sf)
+			}
+		}
+		nestedIndent := indent + "  "
+		for _, sf := range req {
+			renderField(b, sf, nestedIndent)
+		}
+		for _, sf := range opt {
+			renderField(b, sf, nestedIndent)
+		}
+		return
+	}
+
 	// Value line.
-	b.WriteString("#           ")
+	b.WriteString("#")
+	b.WriteString(indent)
 	b.WriteString(f.Name)
 	b.WriteString(": ")
 	b.WriteString(placeholderFor(f))
