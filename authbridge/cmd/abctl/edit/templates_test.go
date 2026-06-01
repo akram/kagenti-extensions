@@ -154,6 +154,12 @@ func TestRenderTemplates_NestedObjectRecurses(t *testing.T) {
 	if !strings.Contains(out, "[REQUIRED] Identity scheme.") {
 		t.Errorf("nested required field annotation missing:\n%s", out)
 	}
+	// Object parent of a required leaf should itself read [REQUIRED]
+	// even though its own tag isn't required:"true" — operators can't
+	// legally omit the block, so [optional] would mislead.
+	if !strings.Contains(out, "[REQUIRED] Client credentials.") {
+		t.Errorf("parent of required leaf should annotate as [REQUIRED]:\n%s", out)
+	}
 	// Nested fields should be indented further than the top-level
 	// config fields. Top-level uses "#           " (11 spaces);
 	// nested adds 2 more.

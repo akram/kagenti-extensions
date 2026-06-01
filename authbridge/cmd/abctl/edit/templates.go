@@ -65,10 +65,14 @@ func renderPluginTemplate(b *strings.Builder, p apiclient.PluginCatalogEntry) {
 	}
 
 	// Split top-level fields into required vs optional for ordering
-	// (required render first inside the config: block).
+	// (required render first inside the config: block). Object fields
+	// with required descendants (e.g. identity wrapping identity.type)
+	// are treated as effectively required so the parent renders at the
+	// top of the block, matching the [REQUIRED] annotation it'll get
+	// from renderField.
 	var required, optional []apiclient.PluginFieldEntry
 	for _, f := range p.Fields {
-		if f.Required {
+		if f.Required || hasRequiredDescendant(f) {
 			required = append(required, f)
 		} else {
 			optional = append(optional, f)
@@ -102,6 +106,21 @@ func renderPluginTemplate(b *strings.Builder, p apiclient.PluginCatalogEntry) {
 	for _, f := range optional {
 		renderField(b, f, "           ")
 	}
+}
+
+// hasRequiredDescendant reports whether f or any field beneath it
+// carries Required=true. An object field whose own Required tag is
+// false but which contains a required leaf (e.g. tokenexchange's
+// identity wrapping a required identity.type) is "effectively
+// required" — the operator can't legally omit the block, so the
+// renderer should show it as [REQUIRED] rather than [optional].
+func hasRequiredDescendant(f apiclient.PluginFieldEntry) bool {
+	for _, sf := range f.Fields {
+		if sf.Required || hasRequiredDescendant(sf) {
+			return true
+		}
+	}
+	return false
 }
 
 // collectRequiredPaths walks the schema tree and returns dotted paths
@@ -147,11 +166,16 @@ func collectRequiredPaths(prefix string, fields []apiclient.PluginFieldEntry) []
 // leading "#"). The default value column is "           " (matching
 // "          config:"); recursive calls deepen by two spaces per level.
 func renderField(b *strings.Builder, f apiclient.PluginFieldEntry, indent string) {
+	// Effective required-ness: a field is required either because its
+	// own tag says so, or because it's an object containing a required
+	// descendant (omitting the parent block makes the child unsettable).
+	effectivelyRequired := f.Required || hasRequiredDescendant(f)
+
 	// Annotation line.
 	b.WriteString("#")
 	b.WriteString(indent)
 	b.WriteString("# ")
-	if f.Required {
+	if effectivelyRequired {
 		b.WriteString("[REQUIRED]")
 	} else {
 		var attrs []string
