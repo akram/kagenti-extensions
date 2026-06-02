@@ -80,8 +80,10 @@ func (s *Store) Get(key string) (any, bool)                 // RLock; lazy-evict
 func (s *Store) Delete(key string)                          // lock; delete
 ```
 
-- Eviction: lazy on `Get` + a periodic sweep (handles minted but never resolved).
-  Mirror `tokenexchange/cache`'s existing TTL approach rather than inventing one.
+- Eviction: lazy on `Get` (v1). A periodic background sweep to reclaim
+  minted-but-never-resolved handles is a future enhancement; for a sidecar with
+  bounded handle volume, lazy eviction plus TTL is sufficient. The store mirrors
+  `tokenexchange/cache`'s thread-safe TTL shape.
 - Correctness under concurrency comes from the unique, unguessable handle key —
   concurrent users never collide.
 - Justified as reusable (not speculative) because `tokenexchange/cache` is already a
@@ -109,8 +111,8 @@ type Context struct {
 
 ### Layer 2 — placeholder logic (in the plugins)
 
-Mint, the `abph_` prefix convention, fail-closed resolve, and `TTL = token.exp` live
-in the two plugins — not in the store.
+Mint, the `abph_` prefix convention, fail-closed resolve, and the configured
+`placeholder_ttl` (default `1h`) live in the two plugins — not in the store.
 
 ### Wiring (mirrors the existing `sessions` injection)
 
@@ -155,7 +157,7 @@ fields, **off by default** (per the feature-flag mandate).
 
 ```go
 PlaceholderMode bool   `json:"placeholder_mode" default:"false" description:"After validating the inbound token, replace it with an opaque placeholder before forwarding to the agent; the real token is held in the shared store for the outbound path to resolve."`
-PlaceholderTTL  string `json:"placeholder_ttl" default:"" description:"How long the real token is retained for outbound resolution. Default: the token's own exp."`
+PlaceholderTTL  string `json:"placeholder_ttl" default:"1h" description:"How long the real token is retained for outbound resolution (Go duration). Default 1h. Binding the TTL to the token's own exp is a future enhancement."`
 ```
 
 `token-exchange` config addition:
@@ -200,7 +202,7 @@ build-time cross-validation.
 
 1. User → reverseproxy with `Authorization: Bearer T`.
 2. jwt-validation validates T → `pctx.Identity`. Mint: `H = "abph_"+CSPRNG`,
-   `pctx.Shared.Put("placeholder/"+H, T, T.exp)`, swap header to `Bearer H`,
+   `pctx.Shared.Put("placeholder/"+H, T, placeholder_ttl)`, swap header to `Bearer H`,
    record `Modify{reason:"placeholder_minted"}` (hash only, never cleartext).
 3. reverseproxy copies the mutated `Authorization` back to `r.Header`, forwards to agent.
 4. Agent holds only `Bearer H`; makes an outbound call forwarding `Bearer H`.
@@ -274,7 +276,7 @@ inbound-propagation idiom and the store backend differ.
 - `shared.Store` unit tests: `Put`/`Get`/`Delete`, TTL expiry with injected clock,
   concurrent access under `-race`.
 - jwt-validation mint: success → header swapped to `abph_`, store entry keyed by handle
-  with T and `ttl≈exp`; validation failure → no mint, deny; no inbound token → no mint;
+  with T and `ttl≈placeholder_ttl`; validation failure → no mint, deny; no inbound token → no mint;
   `nil` Shared → Init/Configure error.
 - **Inbound propagation** (riskiest change, per listener): inbound plugin sets
   `pctx.Headers` Authorization → assert it reaches the agent. reverseproxy: forwarded
