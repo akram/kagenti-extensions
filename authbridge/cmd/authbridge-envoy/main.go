@@ -39,6 +39,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/shared"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
 
 	// Only the ext_proc listener is compiled in (no ext_authz, no
@@ -213,7 +214,7 @@ func main() {
 	}
 
 	var grpcServers []*grpc.Server
-	grpcServers = append(grpcServers, startGRPCExtProc(inboundH, outboundH, sessions, cfg.Listener.ExtProcAddr))
+	grpcServers = append(grpcServers, startGRPCExtProc(inboundH, outboundH, sessions, shared.New(), cfg.Listener.ExtProcAddr))
 
 	statsProvider := func() *auth.Stats {
 		sources := plugins.CollectStats(inboundH.Load())
@@ -296,12 +297,13 @@ func main() {
 	}
 }
 
-func startGRPCExtProc(inbound, outbound *pipeline.Holder, sessions *session.Store, addr string) *grpc.Server {
+func startGRPCExtProc(inbound, outbound *pipeline.Holder, sessions *session.Store, store pipeline.SharedStore, addr string) *grpc.Server {
 	srv := grpc.NewServer()
 	extprocv3.RegisterExternalProcessorServer(srv, &extproc.Server{
 		InboundPipeline:  inbound,
 		OutboundPipeline: outbound,
 		Sessions:         sessions,
+		Shared:           store,
 	})
 	registerHealth(srv)
 	reflection.Register(srv)
