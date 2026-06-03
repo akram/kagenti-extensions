@@ -71,7 +71,7 @@ spec:
             - name: PORT
               value: "8000"
             - name: UPSTREAM_URL
-              value: "http://echo-upstream.team1.svc.cluster.local:8080"
+              value: "http://echo-upstream.team1.svc.cluster.local:8888"
             # AGENT_PUBLIC_URL is what the agent advertises in its
             # /.well-known/agent-card.json. The kagenti UI uses it
             # for the agent card; default below works for the

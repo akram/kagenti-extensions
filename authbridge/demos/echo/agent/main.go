@@ -47,7 +47,7 @@ var proxiedClient *http.Client
 func buildProxiedClient() *http.Client {
 	proxyEnv := os.Getenv("HTTP_PROXY")
 	if proxyEnv == "" {
-		log.Printf("[Agent] HTTP_PROXY unset — outbound HTTP will be direct (no placeholder resolve)")
+		log.Printf("[Agent] HTTP_PROXY unset — outbound HTTP is direct. proxy-sidecar mode would set HTTP_PROXY; envoy-sidecar mode leaves it unset and proxy-init iptables transparently routes egress through Envoy/ext_proc, so the placeholder is still resolved.")
 		return &http.Client{}
 	}
 	u, err := url.Parse(proxyEnv)

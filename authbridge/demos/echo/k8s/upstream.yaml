@@ -36,8 +36,17 @@ spec:
         - name: upstream
           image: echo-upstream:latest
           imagePullPolicy: IfNotPresent
+          # Port 8888 (NOT 8080) on purpose: in envoy-sidecar mode the
+          # operator's proxy-init excludes the agent's own Service port (8080)
+          # from outbound iptables interception, so an upstream on 8080 would
+          # bypass Envoy/ext_proc and the placeholder would never be resolved.
+          # A distinct port is captured and routed through ext_proc. (Proxy-
+          # sidecar mode uses HTTP_PROXY and works on any port.)
+          env:
+            - name: PORT
+              value: "8888"
           ports:
-            - containerPort: 8080
+            - containerPort: 8888
               name: http
           securityContext:
             allowPrivilegeEscalation: false
@@ -61,7 +70,7 @@ spec:
   selector:
     app.kubernetes.io/name: echo-upstream
   ports:
-    - port: 8080
-      targetPort: 8080
+    - port: 8888
+      targetPort: 8888
       protocol: TCP
   type: ClusterIP

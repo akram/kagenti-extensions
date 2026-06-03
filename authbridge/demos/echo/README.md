@@ -78,6 +78,41 @@ make show-result
 (e.g. paste into jwt.io) and confirm `aud` is `echo-upstream` — proof the
 exchange happened on the outbound leg, not the inbound one.
 
+## Testing in envoy-sidecar mode
+
+The demo defaults to **proxy-sidecar** mode. The placeholder feature is
+mode-agnostic — it also works under **envoy-sidecar** mode (Envoy data plane +
+ext_proc + proxy-init iptables). To exercise it:
+
+1. Build + load the ext_proc image and point the platform at it (mirrors
+   `build-sidecar`/`override-sidecar-image`, but for `images.envoyProxy`):
+   ```bash
+   podman build -f ../../cmd/authbridge-envoy/Dockerfile -t authbridge-envoy:placeholder-dev ../..
+   kind load docker-image authbridge-envoy:placeholder-dev --name kagenti
+   podman exec kagenti-control-plane ctr -n k8s.io images tag \
+     localhost/authbridge-envoy:placeholder-dev docker.io/library/authbridge-envoy:placeholder-dev
+   # set images.envoyProxy in kagenti-system/kagenti-platform-config to
+   # authbridge-envoy:placeholder-dev, then restart the operator:
+   kubectl -n kagenti-system rollout restart deploy/kagenti-controller-manager
+   ```
+2. Put echo-agent in envoy mode and restart so the operator re-injects Envoy +
+   ext_proc + proxy-init:
+   ```bash
+   kubectl -n team1 patch agentruntime echo-agent --type=merge \
+     -p '{"spec":{"authBridgeMode":"envoy-sidecar"}}'
+   kubectl -n team1 rollout restart deploy/echo-agent
+   ```
+3. Re-run `make patch-config`, then chat from the UI as above. Both the inbound
+   `abph_…` placeholder and the outbound exchanged JWT behave identically to
+   proxy-sidecar mode.
+
+**Why the upstream listens on `:8888`, not `:8080`.** In envoy mode the
+operator's proxy-init **excludes the agent's own Service port (8080) from
+outbound iptables interception**. An upstream on 8080 would bypass
+Envoy/ext_proc and the placeholder would reach it unresolved. echo-upstream
+therefore uses `:8888`, which is intercepted. (Proxy-sidecar mode routes egress
+via `HTTP_PROXY` and works on any port — so this choice is harmless there.)
+
 ## Known live-cluster gotchas
 
 1. **Operator pull policy.** `override-sidecar-image` only helps if the

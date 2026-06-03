@@ -141,15 +141,32 @@ DEADLINE=$(( $(date +%s) + TIMEOUT ))
 echo "[*] Waiting for authbridge to load the patched config (timeout ${TIMEOUT}s)"
 echo "    target SHA: $WANT_SHA"
 
+# The sidecar container name differs by authbridge mode: "authbridge-proxy"
+# for proxy-sidecar mode, "envoy-proxy" for envoy-sidecar mode. Both serve the
+# same :9093/reload/status. Detect it so the reload-wait works in either mode.
+SIDECAR=$(kubectl -n "$NAMESPACE" get pod -l app.kubernetes.io/name="$AGENT_NAME" \
+    -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null \
+    | tr ' ' '\n' | grep -E '^(authbridge-proxy|envoy-proxy)$' | head -1)
+SIDECAR=${SIDECAR:-authbridge-proxy}
+echo "    sidecar container: $SIDECAR"
+
 ACTIVE_SHA=""
 while [[ $(date +%s) -lt $DEADLINE ]]; do
-  ACTIVE_SHA=$(kubectl -n "$NAMESPACE" exec deploy/"$AGENT_NAME" -c authbridge-proxy -- \
+  ACTIVE_SHA=$(kubectl -n "$NAMESPACE" exec deploy/"$AGENT_NAME" -c "$SIDECAR" -- \
       wget -q -O - http://localhost:9093/reload/status 2>/dev/null | \
       python3 -c 'import json, sys
 try:
     print(json.load(sys.stdin).get("active_config_sha256", ""))
 except Exception:
     pass' 2>/dev/null || true)
+  # The envoy-sidecar image ships no wget, so the exec above yields nothing in
+  # envoy mode. Fall back to the reloader's own log line (it prints the swapped
+  # sha256 prefix) so the wait works in both proxy- and envoy-sidecar modes.
+  if [[ "$ACTIVE_SHA" != "$WANT_SHA" ]] && \
+     kubectl -n "$NAMESPACE" logs deploy/"$AGENT_NAME" -c "$SIDECAR" --tail=200 2>/dev/null \
+       | grep -q "pipelines swapped sha256=${WANT_SHA:0:12}"; then
+    ACTIVE_SHA="$WANT_SHA"
+  fi
   if [[ "$ACTIVE_SHA" == "$WANT_SHA" ]]; then
     echo "[*] Active config SHA matches — patch is live."
     exit 0
@@ -161,7 +178,7 @@ echo "ERROR: authbridge active config did not match patched SHA within ${TIMEOUT
 echo "       want:        $WANT_SHA" >&2
 echo "       last active: ${ACTIVE_SHA:-<none>}" >&2
 echo "       Last 20 lines of the authbridge container:" >&2
-kubectl -n "$NAMESPACE" logs deploy/"$AGENT_NAME" -c authbridge-proxy --tail=20 >&2 || true
+kubectl -n "$NAMESPACE" logs deploy/"$AGENT_NAME" -c "${SIDECAR:-authbridge-proxy}" --tail=20 >&2 || true
 echo >&2
 echo "       Likely causes:" >&2
 echo "         - ConfigMap parse error (look for 'reload failed' above)" >&2
