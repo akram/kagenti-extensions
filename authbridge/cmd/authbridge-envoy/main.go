@@ -213,8 +213,11 @@ func main() {
 		slog.Info("session tracking disabled")
 	}
 
+	store := shared.New()
+	defer store.Close() // stop the TTL janitor on normal main return
+
 	var grpcServers []*grpc.Server
-	grpcServers = append(grpcServers, startGRPCExtProc(inboundH, outboundH, sessions, shared.New(), cfg.Listener.ExtProcAddr))
+	grpcServers = append(grpcServers, startGRPCExtProc(inboundH, outboundH, sessions, store, cfg.Listener.ExtProcAddr))
 
 	statsProvider := func() *auth.Stats {
 		sources := plugins.CollectStats(inboundH.Load())

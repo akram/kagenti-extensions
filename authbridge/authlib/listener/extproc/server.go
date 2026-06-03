@@ -751,6 +751,10 @@ func replaceTokenBodyResponse(token string) *extprocv3.ProcessingResponse {
 								},
 							},
 						},
+						// Strip the internal direction header before forwarding,
+						// matching allowResponse/allowBodyResponse — otherwise
+						// Envoy leaks x-authbridge-direction to the agent/target.
+						RemoveHeaders: []string{"x-authbridge-direction"},
 					},
 				},
 			},
@@ -772,6 +776,10 @@ func replaceTokenResponse(token string) *extprocv3.ProcessingResponse {
 								},
 							},
 						},
+						// Strip the internal direction header before forwarding,
+						// matching allowResponse/allowBodyResponse — otherwise
+						// Envoy leaks x-authbridge-direction to the agent/target.
+						RemoveHeaders: []string{"x-authbridge-direction"},
 					},
 				},
 			},

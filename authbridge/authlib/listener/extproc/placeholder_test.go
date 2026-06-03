@@ -77,6 +77,26 @@ func TestExtProc_Inbound_AuthorizationMutation(t *testing.T) {
 	if got != "Bearer abph_minted" {
 		t.Errorf("authorization = %q, want %q", got, "Bearer abph_minted")
 	}
+
+	// The internal direction header must be stripped on the mint path too,
+	// otherwise Envoy forwards x-authbridge-direction to the agent.
+	if !headerRemoved(resp.GetRequestHeaders().GetResponse(), "x-authbridge-direction") {
+		t.Errorf("expected RemoveHeaders to contain x-authbridge-direction, got %+v", resp)
+	}
+}
+
+// headerRemoved reports whether the CommonResponse's HeaderMutation removes
+// the named header. Shared by the header- and body-path mint tests.
+func headerRemoved(cr *extprocv3.CommonResponse, key string) bool {
+	if cr == nil || cr.GetHeaderMutation() == nil {
+		return false
+	}
+	for _, h := range cr.GetHeaderMutation().GetRemoveHeaders() {
+		if h == key {
+			return true
+		}
+	}
+	return false
 }
 
 // bodyHeaderValue extracts the value for the named SetHeaders key from a
@@ -133,5 +153,10 @@ func TestExtProc_InboundBody_AuthorizationMutation(t *testing.T) {
 	}
 	if got != "Bearer abph_minted" {
 		t.Errorf("authorization = %q, want %q", got, "Bearer abph_minted")
+	}
+
+	// The internal direction header must be stripped on the body mint path too.
+	if !headerRemoved(resp.GetRequestBody().GetResponse(), "x-authbridge-direction") {
+		t.Errorf("expected RemoveHeaders to contain x-authbridge-direction, got %+v", resp)
 	}
 }

@@ -253,6 +253,7 @@ func main() {
 		log.Fatalf("creating forward proxy: %v", err)
 	}
 	sharedStore := shared.New()
+	defer sharedStore.Close() // stop the TTL janitor on normal main return
 	rpSrv.Shared = sharedStore
 	fpSrv.Shared = sharedStore
 	httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
