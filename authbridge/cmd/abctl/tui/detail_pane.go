@@ -9,23 +9,6 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 )
 
-// showDetail loads e into the detail viewport as colorized JSON and
-// remembers the focused event so yank (y) can find it.
-//
-// Marshal with SessionEvent.MarshalJSON first (readable wire form — string
-// enums, durationMs), then filter inference/mcp extensions so request
-// events show only request-side fields and response events show only
-// response-side fields (TUI readability only — wire format is unchanged,
-// and yank still writes the full JSON).
-//
-// When the event arrived over TLS (SessionEvent.TLS non-nil), a small
-// header block is prepended to the JSON so operators can see the
-// connection-level identity at a glance. Absent for plaintext events.
-//
-// The events list is one row per plugin invocation, so showDetail takes the
-// selected invocation and renders a copy of the event scoped to that plugin
-// (see eventScopedToPlugin). A nil invocation renders the whole event.
-//
 // eventScopedToPlugin returns a shallow copy of e whose Invocations and
 // per-plugin Plugins map are limited to the given plugin. Event-level context
 // (protocol slot, identity) is preserved; filterForDetail still trims those by
@@ -63,6 +46,22 @@ func filterInvocationsByPlugin(invs []pipeline.Invocation, plugin string) []pipe
 	return out
 }
 
+// showDetail loads e into the detail viewport as colorized JSON and
+// remembers the focused event so yank (y) can find it.
+//
+// Marshal with SessionEvent.MarshalJSON first (readable wire form — string
+// enums, durationMs), then filter inference/mcp extensions so request
+// events show only request-side fields and response events show only
+// response-side fields (TUI readability only — wire format is unchanged,
+// and yank still writes the full JSON).
+//
+// When the event arrived over TLS (SessionEvent.TLS non-nil), a small
+// header block is prepended to the JSON so operators can see the
+// connection-level identity at a glance. Absent for plaintext events.
+//
+// The events list is one row per plugin invocation, so showDetail takes the
+// selected invocation and renders a copy of the event scoped to that plugin
+// (see eventScopedToPlugin). A nil invocation renders the whole event.
 func (m *model) showDetail(e *pipeline.SessionEvent, inv *pipeline.Invocation) {
 	m.detailEvent = e
 	m.detailInvocation = inv
