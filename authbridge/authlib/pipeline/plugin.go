@@ -166,6 +166,50 @@ type Finisher interface {
 	OnFinish(ctx context.Context, pctx *Context)
 }
 
+// StreamingResponder is an optional interface a plugin may implement
+// when its response handling is naturally per-message rather than over
+// a fully-buffered body. Listeners that detect a streaming response
+// (today: text/event-stream) deliver each complete protocol message
+// to the pipeline as a frame; plugins that opted in see one
+// OnResponseFrame call per frame and a final empty-frame call with
+// last=true so aggregating plugins (inference-parser, a2a-parser)
+// can finalize their running state.
+//
+// Plugins without streaming awareness are unaffected: the listener
+// either falls back to the buffered path (Content-Type: application/json
+// or any non-streaming response) and runs OnResponse as today, or — for
+// streaming responses — skips OnResponse entirely. Aggregating plugins
+// that want to support both shapes implement OnResponseFrame and treat
+// the buffered application/json case as a single last=true frame; the
+// listener delivers it that way for them so one code path covers both
+// shapes.
+//
+// Contract:
+//   - Per-frame ordering matches the wire: frames are dispatched to
+//     plugins in the order the listener parsed them off the upstream
+//     response, in pipeline reverse order (symmetric with RunResponse).
+//   - The frame slice is owned by the listener and is valid only for
+//     the duration of the call. Plugins that need to retain bytes
+//     must copy.
+//   - A non-Continue Action returned mid-stream stops further
+//     dispatch for that frame and rejects the response. The current
+//     forwardproxy/reverseproxy implementations forward+flush before
+//     calling OnResponseFrame for record-only observability, so a
+//     mid-stream Reject from a plugin would not un-send already-sent
+//     bytes; today no plugin returns Reject from this hook. The hook
+//     leaves the door open for per-message enforcement to be added
+//     later (the listener would have to inspect-before-forward at
+//     that point).
+//   - last=true is always called exactly once at end-of-stream, even
+//     for an empty/zero-frame stream. Plugins finalize on last=true.
+//   - For application/json responses the listener calls
+//     OnResponseFrame once with the full body and last=true; OnResponse
+//     is then NOT called for plugins that implement this interface
+//     (the framework picks one path).
+type StreamingResponder interface {
+	OnResponseFrame(ctx context.Context, pctx *Context, frame []byte, last bool) Action
+}
+
 // Readier is an optional interface a plugin may implement when it has
 // deferred initialization that matters to a /readyz probe. The host
 // ANDs Ready() across all implementers to decide whether the pipeline

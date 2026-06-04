@@ -16,6 +16,7 @@ import (
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/httpx"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/internal/sseframe"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
@@ -23,6 +24,31 @@ import (
 )
 
 const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes
+
+// responseHeaderTimeout bounds the time-to-first-byte (headers) for an
+// upstream response. Replaces the old http.Client.Timeout, which
+// covered the entire request lifecycle including the body read and so
+// killed slow streaming responses (text/event-stream MCP tools/call,
+// A2A message/stream, OpenAI streaming chat completions). With the
+// timeout moved to the transport's ResponseHeaderTimeout, slow tools
+// can stream as long as they like — only a wedged upstream that fails
+// to send any headers within this window aborts.
+//
+// 30s preserves the prior behavior's time-to-headers ceiling. Tools
+// that took longer to *return headers* never worked under the old
+// configuration either.
+const responseHeaderTimeout = 30 * time.Second
+
+// streamReadIdleTimeout caps how long the proxy waits for the next
+// byte off a streaming response body. The time.Duration is applied
+// per ReadFrame iteration (see streamingResponseBody). A wedged
+// upstream that goes silent for longer than this aborts the stream,
+// rather than hanging the agent indefinitely. Long enough to permit
+// slow tool work between SSE heartbeats; short enough to surface a
+// dead connection within a few minutes. Tools that need longer idle
+// gaps should emit SSE heartbeats — it's what comment lines in SSE
+// are for.
+const streamReadIdleTimeout = 5 * time.Minute
 
 // Server is an HTTP forward proxy that performs token exchange on outbound requests.
 //
@@ -70,6 +96,10 @@ func NewServer(outbound *pipeline.Holder, sessions *session.Store, mtls *MTLSOpt
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		// Time-to-headers ceiling for the upstream response. Replaces
+		// the old http.Client.Timeout (which covered the body read
+		// and broke streaming). See responseHeaderTimeout.
+		ResponseHeaderTimeout: responseHeaderTimeout,
 	}
 
 	if mtls != nil {
@@ -87,7 +117,11 @@ func NewServer(outbound *pipeline.Holder, sessions *session.Store, mtls *MTLSOpt
 		OutboundPipeline: outbound,
 		Sessions:         sessions,
 		Client: &http.Client{
-			Timeout:   30 * time.Second,
+			// No Client.Timeout — Go applies that to the entire
+			// request lifecycle including body read, which kills
+			// streaming responses. Time-to-headers is enforced via
+			// transport.ResponseHeaderTimeout above; per-read idle
+			// behavior on streaming bodies is in streamingResponseBody.
 			Transport: transport,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
@@ -276,6 +310,25 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	pctx.StatusCode = resp.StatusCode
 	pctx.ResponseHeaders = resp.Header.Clone()
 
+	// Branch on Content-Type per response. The Streamable HTTP transport
+	// lets the server pick application/json vs text/event-stream per
+	// response (the client Accepts both), so the same tool may return
+	// JSON on one call and SSE on the next. Decide here rather than
+	// negotiating, and don't take the streaming path when a plugin
+	// declares WritesBody (mutating a body we've already started
+	// forwarding is incompatible with streaming) — fall back to
+	// buffered with a warning log instead.
+	if isEventStream(resp.Header.Get("Content-Type")) &&
+		s.OutboundPipeline.HasStreamingResponders() &&
+		resp.Body != nil {
+		if s.OutboundPipeline.WritesBody() {
+			slog.Warn("forward-proxy: text/event-stream response with WritesBody plugin — falling back to buffered path", "host", r.Host)
+		} else {
+			s.handleStreamingResponse(w, r, resp, pctx)
+			return
+		}
+	}
+
 	if s.OutboundPipeline.NeedsBody() && resp.Body != nil {
 		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
 		if err != nil {
@@ -298,6 +351,19 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Streaming-aware plugins use a single code path for both shapes:
+	// for the buffered application/json case we deliver the whole body
+	// as one last=true frame so plugins finalize their running state.
+	// Plugins that didn't migrate — i.e. don't implement
+	// StreamingResponder — are unaffected (RunResponseFrame skips them).
+	if s.OutboundPipeline.HasStreamingResponders() && resp.Body != nil {
+		respFrameAction := s.OutboundPipeline.RunResponseFrame(r.Context(), pctx, pctx.ResponseBody, true)
+		if respFrameAction.Type == pipeline.Reject {
+			httpx.WriteRejection(w, respFrameAction)
+			return
+		}
+	}
+
 	// A plugin that called pctx.SetResponseBody flipped the mutation flag.
 	// Use the replaced bytes and rewrite Content-Length so the downstream
 	// client gets a consistent response. Content-Encoding is cleared
@@ -310,33 +376,194 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Header.Del("Content-Encoding")
 	}
 
-	if s.Sessions != nil {
-		sid := s.Sessions.ActiveSession()
-		if sid == "" {
-			sid = session.DefaultSessionID
-		}
-		plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
-		ev := pipeline.SessionEvent{
-			At:          time.Now(),
-			Direction:   pipeline.Outbound,
-			Phase:       pipeline.SessionResponse,
-			MCP:         pipeline.SnapshotMCP(pctx.Extensions.MCP),
-			Inference:   pipeline.SnapshotInference(pctx.Extensions.Inference),
-			Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
-			Plugins:     plugins,
-			Identity:    pipeline.SnapshotIdentity(pctx),
-			Host:        pctx.Host,
-			StatusCode:  resp.StatusCode,
-			Error:       pipeline.DeriveError(pctx),
-			Duration:    pipeline.DurationSince(pctx.StartedAt),
-		}
-		// Same widened gate as the request side — see the request-phase
-		// comment for why each clause matters.
-		if ev.MCP != nil || ev.Inference != nil || ev.Invocations != nil || plugins != nil {
-			s.Sessions.Append(sid, ev)
+	s.recordOutboundResponseEvent(pctx, resp.StatusCode)
+
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
 		}
 	}
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		slog.Debug("response copy error", "host", r.Host, "error", err)
+	}
+}
 
+// recordOutboundResponseEvent emits the SessionResponse event for a
+// completed outbound response. Extracted from handleRequest so the
+// streaming path can call it once at end-of-stream and the buffered
+// path can call it once after RunResponse — both go through the same
+// gate and snapshotting logic.
+func (s *Server) recordOutboundResponseEvent(pctx *pipeline.Context, statusCode int) {
+	if s.Sessions == nil {
+		return
+	}
+	sid := s.Sessions.ActiveSession()
+	if sid == "" {
+		sid = session.DefaultSessionID
+	}
+	plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
+	ev := pipeline.SessionEvent{
+		At:          time.Now(),
+		Direction:   pipeline.Outbound,
+		Phase:       pipeline.SessionResponse,
+		MCP:         pipeline.SnapshotMCP(pctx.Extensions.MCP),
+		Inference:   pipeline.SnapshotInference(pctx.Extensions.Inference),
+		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
+		Plugins:     plugins,
+		Identity:    pipeline.SnapshotIdentity(pctx),
+		Host:        pctx.Host,
+		StatusCode:  statusCode,
+		Error:       pipeline.DeriveError(pctx),
+		Duration:    pipeline.DurationSince(pctx.StartedAt),
+	}
+	// Same widened gate as the request side — see the request-phase
+	// comment for why each clause matters.
+	if ev.MCP != nil || ev.Inference != nil || ev.Invocations != nil || plugins != nil {
+		s.Sessions.Append(sid, ev)
+	}
+}
+
+// isEventStream reports whether a Content-Type header value names the
+// SSE media type. Content-Type may carry parameters (charset=, boundary=,
+// etc.) so we match on the bare type/subtype prefix and tolerate any
+// suffix. Case-insensitive per RFC 9110 §8.3.1.
+func isEventStream(contentType string) bool {
+	if contentType == "" {
+		return false
+	}
+	// Strip parameters: "text/event-stream; charset=utf-8" → "text/event-stream".
+	if idx := indexByteASCIICaseInsensitive(contentType, ';'); idx >= 0 {
+		contentType = contentType[:idx]
+	}
+	contentType = trimASCIISpace(contentType)
+	return equalASCIIFold(contentType, "text/event-stream")
+}
+
+// handleStreamingResponse forwards a text/event-stream response to the
+// downstream client frame-by-frame. Each parsed SSE event is delivered
+// to the pipeline's StreamingResponder plugins (recording-only today)
+// and then written + flushed to the client immediately. End-of-stream
+// is signaled to plugins with one final last=true call so aggregating
+// plugins (inference-parser, a2a-parser) can finalize their running
+// state. RunResponse is intentionally NOT invoked on this path —
+// streaming-aware plugins move their finalization logic into
+// OnResponseFrame(last=true), and legacy non-migrated plugins are
+// not called on streaming responses (cleaner contract; no fragmented
+// double-dispatch).
+func (s *Server) handleStreamingResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, pctx *pipeline.Context) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// No flusher means the downstream connection can't deliver
+		// bytes incrementally — fall back to buffered. http.Flusher
+		// is supported by net/http's default ResponseWriter, so this
+		// is a defensive guard for exotic wrappers (httptest with a
+		// custom recorder, embedded servers).
+		slog.Warn("forward-proxy: ResponseWriter does not support flushing — falling back to buffered for streaming response", "host", r.Host)
+		s.streamFallbackBuffered(w, r, resp, pctx)
+		return
+	}
+
+	// Forward headers and the streaming status code BEFORE the first
+	// frame is written. Strip Content-Length since we'll be writing
+	// chunked, and clear hop-by-hop headers as net/http would.
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.Header().Del("Content-Length")
+	w.WriteHeader(resp.StatusCode)
+	flusher.Flush()
+
+	reader := sseframe.NewReader(idleReader(resp.Body, streamReadIdleTimeout), maxBodySize)
+	bytesWritten := 0
+	for {
+		frame, err := reader.ReadFrame()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			// Read error or oversized single frame. The client has
+			// already received some frames; the cleanest signal is to
+			// close the connection and log. We can't promote this to
+			// 502 — headers are sent.
+			slog.Warn("forward-proxy: streaming response read error", "host", r.Host, "error", err, "bytesWritten", bytesWritten)
+			break
+		}
+
+		// Record-only dispatch: invoke plugins then write+flush.
+		// A future enforcement-aware version can inspect-before-forward;
+		// see StreamingResponder doc.
+		respAction := s.OutboundPipeline.RunResponseFrame(r.Context(), pctx, frame, false)
+		if respAction.Type == pipeline.Reject {
+			// Headers + earlier frames already on the wire — log and
+			// stop forwarding. The downstream client sees a truncated
+			// stream, which is the best we can do without inspect-
+			// before-forward semantics.
+			slog.Warn("forward-proxy: streaming response rejected mid-stream by plugin",
+				"host", r.Host, "violation", respAction.Violation)
+			break
+		}
+
+		// Write the frame back as a single SSE event. Reconstructing
+		// "data: ...\n\n" preserves the SSE wire shape regardless of
+		// whether the upstream used "data: " or "data:" or split across
+		// multiple data lines. Multi-line data is folded onto one line
+		// here, which is fine for JSON-RPC payloads (no embedded LF).
+		if _, err := w.Write([]byte("data: ")); err != nil {
+			slog.Debug("forward-proxy: streaming write error", "host", r.Host, "error", err)
+			return
+		}
+		if _, err := w.Write(frame); err != nil {
+			slog.Debug("forward-proxy: streaming write error", "host", r.Host, "error", err)
+			return
+		}
+		if _, err := w.Write([]byte("\n\n")); err != nil {
+			slog.Debug("forward-proxy: streaming write error", "host", r.Host, "error", err)
+			return
+		}
+		flusher.Flush()
+		bytesWritten += len(frame)
+	}
+
+	// Final last=true call so aggregating plugins (inference-parser,
+	// a2a-parser) finalize. Always called exactly once even on a zero-
+	// frame stream (per StreamingResponder contract).
+	s.OutboundPipeline.RunResponseFrame(r.Context(), pctx, nil, true)
+
+	s.recordOutboundResponseEvent(pctx, resp.StatusCode)
+}
+
+// streamFallbackBuffered handles the rare case of a streaming
+// Content-Type response on a ResponseWriter that doesn't support
+// http.Flusher — falls back to the original buffered path. The
+// duplicated logic is small enough to keep here rather than refactor
+// the main handler around the Flusher fork.
+func (s *Server) streamFallbackBuffered(w http.ResponseWriter, r *http.Request, resp *http.Response, pctx *pipeline.Context) {
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
+	if err != nil {
+		slog.Warn("forward-proxy: response body read error", "host", r.Host, "error", err)
+		http.Error(w, `{"error":"response body read error"}`, http.StatusBadGateway)
+		return
+	}
+	if len(respBody) > maxBodySize {
+		slog.Warn("forward-proxy: response body too large", "host", r.Host, "len", len(respBody))
+		http.Error(w, `{"error":"response body too large"}`, http.StatusBadGateway)
+		return
+	}
+	pctx.ResponseBody = respBody
+	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
+	respAction := s.OutboundPipeline.RunResponse(r.Context(), pctx)
+	if respAction.Type == pipeline.Reject {
+		httpx.WriteRejection(w, respAction)
+		return
+	}
+	if s.OutboundPipeline.HasStreamingResponders() {
+		_ = s.OutboundPipeline.RunResponseFrame(r.Context(), pctx, respBody, true)
+	}
+	s.recordOutboundResponseEvent(pctx, resp.StatusCode)
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -523,6 +750,92 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(clientConn, upstream)
 	_ = clientConn.Close()
 	_ = upstream.Close()
+}
+
+// idleReader wraps r so each Read enforces an idle deadline. The
+// goroutine pattern (timer reset on every Read entry, cancelled on
+// every Read exit) is portable across any io.ReadCloser, unlike
+// SetReadDeadline which only applies to net.Conn — and for HTTPS
+// upstreams the proxy holds the *http.Response.Body, not the
+// underlying conn. On idle expiry the reader closes the body, which
+// causes the in-flight Read to return an error and unblocks the
+// caller. Subsequent Reads return the same close error.
+//
+// The wrapper does not buffer; bufio's reader inside sseframe.Reader
+// continues to do that. The deadline is per-Read, not per-frame, so
+// a long-running tool that emits one byte every minute (within the
+// idle window) keeps the stream alive. The streamReadIdleTimeout
+// constant captures the wall-clock budget.
+type idleReadCloser struct {
+	rc      io.ReadCloser
+	timeout time.Duration
+}
+
+func idleReader(rc io.ReadCloser, timeout time.Duration) io.ReadCloser {
+	return &idleReadCloser{rc: rc, timeout: timeout}
+}
+
+func (i *idleReadCloser) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(i.timeout, func() {
+		// Closing the body unblocks Read with an error. Idempotent on
+		// http.Response.Body (subsequent Closes are no-ops).
+		_ = i.rc.Close()
+	})
+	n, err := i.rc.Read(p)
+	timer.Stop()
+	return n, err
+}
+
+func (i *idleReadCloser) Close() error { return i.rc.Close() }
+
+// indexByteASCIICaseInsensitive returns the index of the first
+// occurrence of c in s (ASCII), or -1. Case-insensitive in spirit
+// but c is treated as exact — the helper exists for ';' lookup in
+// Content-Type headers, where the separator is unambiguous.
+func indexByteASCIICaseInsensitive(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// trimASCIISpace strips leading and trailing ASCII whitespace.
+// Avoids the strings package's locale-aware Unicode trim because
+// HTTP header tokens are ASCII-only.
+func trimASCIISpace(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
+}
+
+// equalASCIIFold reports whether s and t are equal under ASCII case
+// folding. Used for Content-Type comparison without pulling in a
+// Unicode-aware comparator.
+func equalASCIIFold(s, t string) bool {
+	if len(s) != len(t) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		a, b := s[i], t[i]
+		if a >= 'A' && a <= 'Z' {
+			a += 'a' - 'A'
+		}
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if a != b {
+			return false
+		}
+	}
+	return true
 }
 
 // enableKeepalive turns on TCP keepalive with a 30s probe interval on

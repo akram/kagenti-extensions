@@ -211,11 +211,40 @@ func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
+// OnResponse is the buffered-path response hook. Streaming-aware
+// listeners do NOT call it on text/event-stream responses — they
+// dispatch through OnResponseFrame instead (see StreamingResponder).
+// For application/json responses streaming-aware listeners deliver a
+// single last=true frame to OnResponseFrame, so this method exists
+// only to support listeners (or pipelines with no streaming-aware
+// plugins) that still take the buffered RunResponse path.
+//
+// To avoid double-recording on streaming-aware listeners that call
+// both RunResponse and RunResponseFrame for non-streaming responses,
+// the per-frame path bypasses OnResponse via the StreamingResponder
+// type assertion in pipeline.RunResponse — actually no, RunResponse
+// runs all plugins regardless. So when running a streaming-aware
+// pipeline, RunResponseFrame is the one that records; OnResponse
+// here is the no-op for the same response.
+//
+// The compromise: OnResponseFrame populates pctx.Extensions.MCP.Result
+// and records the Observe. OnResponse only acts when no streaming-
+// aware path has fired, gated on whether the result/error has already
+// been populated by OnResponseFrame.
 func (p *MCPParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	// Stay silent when the request side never participated — the parser
 	// recorded nothing on request, so recording on response would orphan
 	// the row.
 	if pctx.Extensions.MCP == nil {
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+	// If OnResponseFrame already populated the result/error or recorded
+	// a skip on this pass, don't re-record. This keeps the buffered and
+	// streaming paths from emitting duplicate rows when the listener
+	// runs both (it shouldn't, today — the streaming path skips
+	// RunResponse entirely — but the guard is cheap and protects
+	// future listener variants).
+	if pctx.Extensions.MCP.Result != nil || pctx.Extensions.MCP.Err != nil {
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 	// We DID process the request but the response has no body — typical
@@ -235,6 +264,64 @@ func (p *MCPParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeli
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
+	applyMCPResponseRPC(pctx, rpc)
+	slog.Debug("mcp-parser: response detail", "method", pctx.Extensions.MCP.Method, "body", parsercommon.Truncate(string(pctx.ResponseBody), parsercommon.DebugBodyMax))
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// OnResponseFrame is the streaming-aware response hook. Listeners
+// invoke it once per SSE frame (text/event-stream) and once with
+// last=true at end-of-stream. application/json responses arrive as
+// a single last=true frame — so the same code handles both shapes.
+//
+// Per-message recording: for MCP, each frame's payload is one
+// complete JSON-RPC response message. We parse + record per message
+// rather than waiting for end-of-stream, so a long-running tools/call
+// surfaces partial results in the session timeline as they arrive.
+func (p *MCPParser) OnResponseFrame(_ context.Context, pctx *pipeline.Context, frame []byte, last bool) pipeline.Action {
+	// Stay silent when the request side never participated.
+	if pctx.Extensions.MCP == nil {
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
+	// End-of-stream call with no payload. If we never saw a frame with
+	// a result/error and the response body was empty, record a Skip
+	// (matches the buffered path's "no_response_body" semantics so
+	// abctl pairs request and response rows uniformly across shapes).
+	// For non-empty streams the per-frame Observe entries are the
+	// session timeline; nothing to do on last=true.
+	if len(frame) == 0 {
+		if last && pctx.Extensions.MCP.Result == nil && pctx.Extensions.MCP.Err == nil {
+			pctx.Skip("no_response_body")
+		}
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
+	var rpc jsonRPCResponse
+	if err := json.Unmarshal(frame, &rpc); err != nil {
+		// A malformed JSON-RPC message in a stream is unusual but
+		// recoverable — skip it and keep going. Don't return Reject
+		// because the listener is forwarding bytes regardless of what
+		// we say (record-only contract).
+		slog.Debug("mcp-parser: malformed frame, skipping", "error", err, "frameLen", len(frame))
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+	if rpc.Result == nil && rpc.Error == nil {
+		// Notifications, heartbeats, or other JSON-RPC shapes without
+		// a result/error envelope — silently skip (no observation).
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
+	applyMCPResponseRPC(pctx, rpc)
+	slog.Debug("mcp-parser: streaming frame", "method", pctx.Extensions.MCP.Method, "body", parsercommon.Truncate(string(frame), parsercommon.DebugBodyMax))
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// applyMCPResponseRPC mutates pctx.Extensions.MCP from a parsed
+// JSON-RPC response and emits the operator-facing log + Observe row.
+// Shared by OnResponse (buffered) and OnResponseFrame (streaming) so
+// the two paths agree on what gets recorded for one envelope.
+func applyMCPResponseRPC(pctx *pipeline.Context, rpc jsonRPCResponse) {
 	if rpc.Error != nil {
 		pctx.Extensions.MCP.Err = &pipeline.MCPError{
 			Code:    rpc.Error.Code,
@@ -243,17 +330,13 @@ func (p *MCPParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeli
 		}
 		slog.Info("mcp-parser: response error", "method", pctx.Extensions.MCP.Method, "code", rpc.Error.Code, "message", rpc.Error.Message)
 		pctx.Observe("response_error")
-		return pipeline.Action{Type: pipeline.Continue}
+		return
 	}
-
 	if rpc.Result != nil {
 		pctx.Extensions.MCP.Result = rpc.Result
 		slog.Info("mcp-parser: response", "method", pctx.Extensions.MCP.Method, "resultKeys", resultKeys(rpc.Result))
-		slog.Debug("mcp-parser: response detail", "method", pctx.Extensions.MCP.Method, "body", parsercommon.Truncate(string(pctx.ResponseBody), parsercommon.DebugBodyMax))
 	}
-
 	pctx.Observe("matched_" + pctx.Extensions.MCP.Method + "_response")
-	return pipeline.Action{Type: pipeline.Continue}
 }
 
 // parseMCPResponse handles both plain JSON-RPC responses and SSE event streams
