@@ -333,35 +333,62 @@ setup_enforce_drop() {
 # Unlike enforce-drop there is no conntrack ESTABLISHED rule: nat only evaluates
 # the first packet of a flow, so replies and established connections are not
 # re-translated.
+# Two chains are needed because REDIRECT is a nat-table target but the nat table
+# forbids DROP ("the use of DROP is therefore inhibited"):
+#   * nat   OUTPUT / AB_REDIRECT — REDIRECT external TCP to TRANSPARENT_PORT.
+#   * mangle OUTPUT / AB_NOTCP   — DROP external non-TCP (UDP/QUIC) so HTTP/3
+#                                  cannot bypass; `-p tcp -j RETURN` lets TCP
+#                                  fall through to the nat REDIRECT.
+# mangle runs before nat in the OUTPUT hook, so non-TCP is dropped on its
+# original destination and TCP is passed to the nat REDIRECT. Both are inserted
+# at position 1 to precede Istio's appended chains.
 setup_enforce_redirect() {
-  CHAIN="AB_REDIRECT"
+  REDIR_CHAIN="AB_REDIRECT"
+  NOTCP_CHAIN="AB_NOTCP"
 
-  echo "enforce-redirect: installing fail-closed egress capture (nat OUTPUT, chain ${CHAIN})"
-  echo "enforce-redirect: external TCP -> 127.0.0.1:${TRANSPARENT_PORT}; exempt proxy UID=${PROXY_UID}; direct in-cluster CIDRs=${CLUSTER_CIDRS}"
+  echo "enforce-redirect: installing fail-closed egress capture"
+  echo "enforce-redirect: external TCP -> 127.0.0.1:${TRANSPARENT_PORT} (nat REDIRECT); external non-TCP -> DROP (mangle)"
+  echo "enforce-redirect: exempt proxy UID=${PROXY_UID}; direct in-cluster CIDRs=${CLUSTER_CIDRS}"
 
-  # --- IPv4 ---
-  ${IPT} -t nat -N "${CHAIN}" 2>/dev/null || true
-  ${IPT} -t nat -F "${CHAIN}"
+  # --- IPv4: nat REDIRECT for TCP ---
+  ${IPT} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
+  ${IPT} -t nat -F "${REDIR_CHAIN}"
   # ztunnel's own sockets (ambient) carry fwmark 0x539 — let them through.
-  ${IPT} -t nat -A "${CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
   # the AuthBridge proxy's own re-originated egress (runs as PROXY_UID) — avoids
   # redirecting the proxy's upstream dial back into itself.
-  ${IPT} -t nat -A "${CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
   # app -> forward proxy over loopback (HTTP_PROXY target), and any loopback.
-  ${IPT} -t nat -A "${CHAIN}" -o lo -j RETURN
-  ${IPT} -t nat -A "${CHAIN}" -d 127.0.0.0/8 -j RETURN
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -o lo -j RETURN
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -d 127.0.0.0/8 -j RETURN
   # in-cluster traffic (pods / services / DNS) — left direct, carried by the mesh.
   for cidr in $(echo "${CLUSTER_CIDRS}" | tr ',' ' '); do
-    [ -n "${cidr}" ] && ${IPT} -t nat -A "${CHAIN}" -d "${cidr}" -j RETURN
+    [ -n "${cidr}" ] && ${IPT} -t nat -A "${REDIR_CHAIN}" -d "${cidr}" -j RETURN
   done
   # external TCP that bypassed the forward proxy — capture it transparently.
-  ${IPT} -t nat -A "${CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
-  # external non-TCP (UDP/QUIC) — cannot be redirected to a TCP listener; drop so
-  # HTTP/3 cannot bypass. Clients fall back to TCP, which the rule above captures.
-  ${IPT} -t nat -A "${CHAIN}" -j DROP
-  # Hook at position 1 so we run before any appended Istio nat chain.
-  if ! ${IPT} -t nat -C OUTPUT -j "${CHAIN}" 2>/dev/null; then
-    ${IPT} -t nat -I OUTPUT 1 -j "${CHAIN}"
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
+  if ! ${IPT} -t nat -C OUTPUT -j "${REDIR_CHAIN}" 2>/dev/null; then
+    ${IPT} -t nat -I OUTPUT 1 -j "${REDIR_CHAIN}"
+  fi
+
+  # --- IPv4: mangle DROP for non-TCP ---
+  ${IPT} -t mangle -N "${NOTCP_CHAIN}" 2>/dev/null || true
+  ${IPT} -t mangle -F "${NOTCP_CHAIN}"
+  # established/related replies (incl. UDP conntrack, e.g. DNS replies) first.
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -o lo -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -d 127.0.0.0/8 -j RETURN
+  for cidr in $(echo "${CLUSTER_CIDRS}" | tr ',' ' '); do
+    [ -n "${cidr}" ] && ${IPT} -t mangle -A "${NOTCP_CHAIN}" -d "${cidr}" -j RETURN
+  done
+  # TCP is handled by the nat REDIRECT above — let it pass mangle untouched.
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -p tcp -j RETURN
+  # everything else == external non-TCP egress (UDP/QUIC) — drop it.
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -j DROP
+  if ! ${IPT} -t mangle -C OUTPUT -j "${NOTCP_CHAIN}" 2>/dev/null; then
+    ${IPT} -t mangle -I OUTPUT 1 -j "${NOTCP_CHAIN}"
   fi
   echo "enforce-redirect: IPv4 egress capture configured"
 
@@ -370,21 +397,38 @@ setup_enforce_redirect() {
   # loopback + link-local (fe80::/10 unicast, ff02::/16 NDP/MLD multicast) and
   # the proxy UID / ztunnel mark; REDIRECT external v6 TCP; DROP other v6 egress.
   if command -v "${IP6T%% *}" >/dev/null 2>&1 && ${IP6T} -t nat -L >/dev/null 2>&1; then
-    ${IP6T} -t nat -N "${CHAIN}" 2>/dev/null || true
-    ${IP6T} -t nat -F "${CHAIN}"
-    ${IP6T} -t nat -A "${CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
-    ${IP6T} -t nat -A "${CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
-    ${IP6T} -t nat -A "${CHAIN}" -o lo -j RETURN
-    ${IP6T} -t nat -A "${CHAIN}" -d ::1/128 -j RETURN
-    ${IP6T} -t nat -A "${CHAIN}" -d fe80::/10 -j RETURN
-    ${IP6T} -t nat -A "${CHAIN}" -d ff02::/16 -j RETURN
+    ${IP6T} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
+    ${IP6T} -t nat -F "${REDIR_CHAIN}"
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -o lo -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ::1/128 -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -d fe80::/10 -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ff02::/16 -j RETURN
     for cidr in $(echo "${CLUSTER_CIDRS6}" | tr ',' ' '); do
-      [ -n "${cidr}" ] && ${IP6T} -t nat -A "${CHAIN}" -d "${cidr}" -j RETURN
+      [ -n "${cidr}" ] && ${IP6T} -t nat -A "${REDIR_CHAIN}" -d "${cidr}" -j RETURN
     done
-    ${IP6T} -t nat -A "${CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
-    ${IP6T} -t nat -A "${CHAIN}" -j DROP
-    if ! ${IP6T} -t nat -C OUTPUT -j "${CHAIN}" 2>/dev/null; then
-      ${IP6T} -t nat -I OUTPUT 1 -j "${CHAIN}"
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
+    if ! ${IP6T} -t nat -C OUTPUT -j "${REDIR_CHAIN}" 2>/dev/null; then
+      ${IP6T} -t nat -I OUTPUT 1 -j "${REDIR_CHAIN}"
+    fi
+
+    ${IP6T} -t mangle -N "${NOTCP_CHAIN}" 2>/dev/null || true
+    ${IP6T} -t mangle -F "${NOTCP_CHAIN}"
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -o lo -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d ::1/128 -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d fe80::/10 -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d ff02::/16 -j RETURN
+    for cidr in $(echo "${CLUSTER_CIDRS6}" | tr ',' ' '); do
+      [ -n "${cidr}" ] && ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d "${cidr}" -j RETURN
+    done
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -p tcp -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -j DROP
+    if ! ${IP6T} -t mangle -C OUTPUT -j "${NOTCP_CHAIN}" 2>/dev/null; then
+      ${IP6T} -t mangle -I OUTPUT 1 -j "${NOTCP_CHAIN}"
     fi
     echo "enforce-redirect: IPv6 egress capture configured"
   else

@@ -5,14 +5,16 @@
 #
 # It validates, in a private network namespace:
 #   1. Rule STRUCTURE — the AB_REDIRECT chain is hooked from nat OUTPUT at
-#      position 1 with the expected RETURN exemptions, a `-p tcp` REDIRECT to
-#      TRANSPARENT_PORT, and a terminal DROP; and no mangle rules are created.
+#      position 1 with the expected RETURN exemptions and a `-p tcp` REDIRECT to
+#      TRANSPARENT_PORT (no DROP — the nat table forbids it); and the AB_NOTCP
+#      chain is hooked from mangle OUTPUT with `-p tcp RETURN` then a terminal
+#      DROP for external non-TCP egress.
 #   2. CAPTURE (not drop) + AMBIENT ROBUSTNESS — external TCP egress is
 #      REDIRECTed to TRANSPARENT_PORT, preempting a simulated Istio ambient
 #      "nat OUTPUT REDIRECT" appended after our chain. Proven via packet
 #      counters: our REDIRECT increments, the simulated ISTIO REDIRECT does not.
 #   3. NON-TCP DROP — an external UDP datagram (QUIC/HTTP-3 bypass attempt) hits
-#      the terminal DROP, proving non-TCP external egress cannot bypass.
+#      the mangle AB_NOTCP DROP, proving non-TCP external egress cannot bypass.
 #
 # Requirements: root (for unshare --net + iptables), iproute2, iptables-nft,
 # bash, the dummy kernel module. Runs on Linux / CI (e.g. ubuntu-latest); not on
@@ -51,26 +53,37 @@ env MODE=enforce-redirect PROXY_UID=1337 CLUSTER_CIDRS=10.0.0.0/8 \
     IPTABLES_CMD="${IPT}" IP6TABLES_CMD=ip6tables-nft \
     sh "${INIT}" || { echo "FAIL: init script exited non-zero"; exit 1; }
 
-dump=$("${IPT}" -t nat -S)
-echo "--- nat ruleset ---"; echo "${dump}"
+natdump=$("${IPT}" -t nat -S)
+mangledump=$("${IPT}" -t mangle -S)
+echo "--- nat ruleset ---"; echo "${natdump}"
+echo "--- mangle ruleset ---"; echo "${mangledump}"
 
-assert() { if echo "${dump}" | grep -qE "$2"; then echo "PASS: $1"; else echo "FAIL: $1"; fail=1; fi; }
-assert "AB_REDIRECT hooked from OUTPUT" '^-A OUTPUT -j AB_REDIRECT'
-assert "ztunnel mark RETURN"            'AB_REDIRECT .*mark.*0x539.*-j RETURN'
-assert "proxy UID RETURN"               'AB_REDIRECT .*--uid-owner 1337 -j RETURN'
-assert "loopback iface RETURN"          'AB_REDIRECT -o lo -j RETURN'
-assert "loopback cidr RETURN"           'AB_REDIRECT -d 127.0.0.0/8 -j RETURN'
-assert "cluster cidr RETURN"            'AB_REDIRECT -d 10.0.0.0/8 -j RETURN'
-assert "tcp REDIRECT to transparent"    "AB_REDIRECT -p tcp -j REDIRECT --to-ports ${TPORT}"
-assert "terminal DROP (non-tcp)"        'AB_REDIRECT -j DROP'
+assert() { if echo "$3" | grep -qE "$2"; then echo "PASS: $1"; else echo "FAIL: $1"; fail=1; fi; }
+# nat AB_REDIRECT — TCP capture (no DROP; nat forbids it).
+assert "AB_REDIRECT hooked from nat OUTPUT" '^-A OUTPUT -j AB_REDIRECT' "${natdump}"
+assert "nat ztunnel mark RETURN"            'AB_REDIRECT .*mark.*0x539.*-j RETURN' "${natdump}"
+assert "nat proxy UID RETURN"               'AB_REDIRECT .*--uid-owner 1337 -j RETURN' "${natdump}"
+assert "nat loopback iface RETURN"          'AB_REDIRECT -o lo -j RETURN' "${natdump}"
+assert "nat loopback cidr RETURN"           'AB_REDIRECT -d 127.0.0.0/8 -j RETURN' "${natdump}"
+assert "nat cluster cidr RETURN"            'AB_REDIRECT -d 10.0.0.0/8 -j RETURN' "${natdump}"
+assert "nat tcp REDIRECT to transparent"    "AB_REDIRECT -p tcp -j REDIRECT --to-ports ${TPORT}" "${natdump}"
+if echo "${natdump}" | grep -qE 'AB_REDIRECT -j DROP'; then
+  echo "FAIL: nat AB_REDIRECT must not contain DROP (nat table forbids it)"; fail=1
+else echo "PASS: nat AB_REDIRECT has no DROP (correctly delegated to mangle)"; fi
+# mangle AB_NOTCP — non-TCP drop, TCP passes through to the nat REDIRECT.
+assert "AB_NOTCP hooked from mangle OUTPUT"  '^-A OUTPUT -j AB_NOTCP' "${mangledump}"
+assert "mangle established/related RETURN"   'AB_NOTCP -m conntrack --ctstate (ESTABLISHED,RELATED|RELATED,ESTABLISHED) -j RETURN' "${mangledump}"
+assert "mangle proxy UID RETURN"             'AB_NOTCP .*--uid-owner 1337 -j RETURN' "${mangledump}"
+assert "mangle cluster cidr RETURN"          'AB_NOTCP -d 10.0.0.0/8 -j RETURN' "${mangledump}"
+assert "mangle tcp RETURN (defer to nat)"    'AB_NOTCP -p tcp -j RETURN' "${mangledump}"
+assert "mangle terminal DROP (non-tcp)"      'AB_NOTCP -j DROP' "${mangledump}"
 
 pos1=$("${IPT}" -t nat -L OUTPUT --line-numbers -n | awk '$1=="1"{print $2}')
-if [ "${pos1}" = "AB_REDIRECT" ]; then echo "PASS: AB_REDIRECT at OUTPUT position 1"
-else echo "FAIL: AB_REDIRECT not at OUTPUT position 1 (got '${pos1}')"; fail=1; fi
-
-manglecount=$("${IPT}" -t mangle -S | grep -cE 'AB_REDIRECT|AB_EGRESS' || true)
-if [ "${manglecount:-0}" -eq 0 ]; then echo "PASS: no mangle-table rules created"
-else echo "FAIL: enforce-redirect created mangle rules"; fail=1; fi
+if [ "${pos1}" = "AB_REDIRECT" ]; then echo "PASS: AB_REDIRECT at nat OUTPUT position 1"
+else echo "FAIL: AB_REDIRECT not at nat OUTPUT position 1 (got '${pos1}')"; fail=1; fi
+mpos1=$("${IPT}" -t mangle -L OUTPUT --line-numbers -n | awk '$1=="1"{print $2}')
+if [ "${mpos1}" = "AB_NOTCP" ]; then echo "PASS: AB_NOTCP at mangle OUTPUT position 1"
+else echo "FAIL: AB_NOTCP not at mangle OUTPUT position 1 (got '${mpos1}')"; fail=1; fi
 
 echo "### Capture + preemption test: append a simulated ISTIO_OUTPUT nat REDIRECT"
 "${IPT}" -t nat -A OUTPUT -p tcp -d "${EXTERNAL}" -j REDIRECT --to-ports 19999
@@ -89,8 +102,8 @@ fi
 
 echo "### Non-TCP drop test: send an external UDP datagram (QUIC bypass attempt)"
 timeout 2 bash -c "echo -n x >/dev/udp/${EXTERNAL}/53" 2>/dev/null || true
-dropc=$("${IPT}" -t nat -L AB_REDIRECT -n -v | awk '/DROP/{print $1; exit}')
-echo "AB_REDIRECT DROP pkts=${dropc:-?}"
+dropc=$("${IPT}" -t mangle -L AB_NOTCP -n -v | awk '/DROP/{print $1; exit}')
+echo "mangle AB_NOTCP DROP pkts=${dropc:-?}"
 if [ "${dropc:-0}" -gt 0 ]; then
   echo "PASS: external UDP dropped (HTTP/3 cannot bypass)"
 else

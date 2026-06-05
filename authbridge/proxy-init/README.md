@@ -43,27 +43,28 @@ default 8082), which recovers the original destination via
 Because nothing is dropped, agents that ignore `HTTP_PROXY` keep working
 — which is what lets enforcement be always-on.
 
-`init-iptables.sh` builds a dedicated `AB_REDIRECT` chain hooked from
-**`nat` OUTPUT at position 1** (REDIRECT is a nat-table target), with
-this order:
+`init-iptables.sh` installs **two** chains, because `REDIRECT` is a
+nat-table target but the nat table forbids `DROP` (`iptables` errors with
+"the use of DROP is therefore inhibited"):
 
-1. `RETURN` ztunnel's own sockets (fwmark `0x539`) — no-op without ambient.
-2. `RETURN` the proxy's own re-originated egress (`--uid-owner $PROXY_UID`, default 1337) — avoids the redirect loop.
-3. `RETURN` loopback (the app → forward proxy hop) and in-cluster CIDRs (`CLUSTER_CIDRS`, mesh/DNS) — left direct.
-4. `REDIRECT` external **TCP** to `TRANSPARENT_PORT` — captured.
-5. `DROP` everything else — external **non-TCP** (UDP/QUIC), so HTTP/3 cannot bypass; well-behaved clients fall back to TCP and get captured.
+- **`nat` OUTPUT / `AB_REDIRECT`** (position 1): `RETURN` ztunnel mark
+  `0x539`, the proxy UID (`--uid-owner $PROXY_UID`, avoids the loop),
+  loopback, and `CLUSTER_CIDRS`; then `REDIRECT` external **TCP** to
+  `TRANSPARENT_PORT`.
+- **`mangle` OUTPUT / `AB_NOTCP`** (position 1): the same exemptions
+  (plus `ESTABLISHED,RELATED` first, so UDP conntrack replies like DNS
+  pass), then `-p tcp -j RETURN` (TCP is handled by the nat REDIRECT) and
+  a terminal `DROP` for external **non-TCP** (UDP/QUIC), so HTTP/3 cannot
+  bypass — well-behaved clients fall back to TCP and get captured.
 
-An IPv6 mirror applies the same exemptions, REDIRECTs external v6 TCP,
-and drops other v6 egress. There is no conntrack `ESTABLISHED` rule —
-nat only evaluates the first packet of a flow, so replies and
-established connections are not re-translated.
-
-`enforce-redirect` is inserted at `nat OUTPUT` position 1, ahead of
-Istio's appended (`-A`) `ISTIO_OUTPUT` chain, so it preempts ambient's
-nat redirect for external destinations — exactly as `redirect` mode does
-for the Envoy path. See
+Because the OUTPUT hook order is `raw → mangle → nat → filter`, the
+mangle chain drops non-TCP on its original destination while TCP falls
+through to the nat REDIRECT. Both chains are inserted at position 1,
+ahead of Istio's appended (`-A`) chains, so they preempt ambient's nat
+redirect for external destinations — exactly as `redirect` mode does for
+the Envoy path. IPv6 mirrors apply the same rules. See
 [`test-enforce-redirect.sh`](./test-enforce-redirect.sh), which proves
-both the capture and the preemption via packet counters.
+the capture, the preemption, and the non-TCP drop via packet counters.
 
 `CLUSTER_CIDRS` has the same Kind-shaped default and OCP/EKS override
 requirement as documented under `enforce-drop` below.
