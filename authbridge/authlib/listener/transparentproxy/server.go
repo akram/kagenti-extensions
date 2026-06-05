@@ -34,6 +34,16 @@ type Server struct {
 // forwardproxy.Server.HandleTransparentConn, so transparent and explicit-proxy
 // egress share one auth pipeline.
 func NewServer(handle ConnHandler) *Server {
+	if handle == nil {
+		// Defensive: a nil handler would panic at dispatch and take down the
+		// process. Fall back to closing the connection so a misconfiguration
+		// degrades to "no capture" rather than a crash.
+		handle = func(conn net.Conn, _ string) {
+			slog.Error("transparent-proxy: nil connection handler; closing connection",
+				"remote", conn.RemoteAddr().String())
+			_ = conn.Close()
+		}
+	}
 	return &Server{handle: handle}
 }
 

@@ -8,8 +8,8 @@ env var:
 | `MODE` | Used by | What it does |
 |---|---|---|
 | `redirect` (default) | `envoy-sidecar` | Transparently **REDIRECT**s pod traffic to the Envoy listeners. |
-| `enforce-redirect` | `proxy-sidecar` | Fail-closed egress guard that **captures**: REDIRECTs external TCP that bypasses the forward proxy to AuthBridge's transparent listener; DROPs non-TCP external egress. |
-| `enforce-drop` | `proxy-sidecar` | Fail-closed egress guard that **DROP**s any egress that bypasses the forward proxy. Predates `enforce-redirect`; retained as a no-transparent-listener fallback. |
+| `enforce-redirect` | `proxy-sidecar`, `lite` | Fail-closed egress guard that **captures**: REDIRECTs external TCP that bypasses the forward proxy to AuthBridge's transparent listener; DROPs non-TCP external egress. |
+| `enforce-drop` | `proxy-sidecar`, `lite` | Fail-closed egress guard that **DROP**s any egress that bypasses the forward proxy. Predates `enforce-redirect`; retained as a no-transparent-listener fallback. |
 
 ## `redirect` mode (envoy-sidecar)
 
