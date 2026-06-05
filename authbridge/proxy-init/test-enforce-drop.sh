@@ -16,7 +16,7 @@
 # bash, the dummy kernel module. Runs on Linux / CI (e.g. ubuntu-latest); not
 # on macOS. Uses `unshare --net` (not named `ip netns`) so it also works inside
 # nested containers. Exit code 0 = all pass.
-set -u
+set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INIT="${INIT_SCRIPT:-${SCRIPT_DIR}/init-iptables.sh}"
