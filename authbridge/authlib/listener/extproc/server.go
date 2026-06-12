@@ -161,6 +161,7 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
+		s.InboundPipeline.RunFinish(ctx, pctx, pipeline.OutcomeFromContext(pctx))
 		return rejectFromAction(action), nil
 	}
 
@@ -188,6 +189,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
+		s.InboundPipeline.RunFinish(ctx, pctx, pipeline.OutcomeFromContext(pctx))
 		return rejectFromAction(action), nil
 	}
 
@@ -477,6 +479,7 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 	action := s.OutboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordOutboundReject(pctx, action)
+		s.OutboundPipeline.RunFinish(ctx, pctx, pipeline.OutcomeFromContext(pctx))
 		return rejectFromAction(action), nil
 	}
 
@@ -516,6 +519,7 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 	action := s.OutboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordOutboundReject(pctx, action)
+		s.OutboundPipeline.RunFinish(ctx, pctx, pipeline.OutcomeFromContext(pctx))
 		return rejectFromAction(action), nil
 	}
 
