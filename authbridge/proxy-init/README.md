@@ -8,7 +8,7 @@ env var:
 | `MODE` | Used by | What it does |
 |---|---|---|
 | `redirect` (default) | `envoy-sidecar` | Transparently **REDIRECT**s pod traffic to the Envoy listeners. |
-| `enforce-redirect` | `proxy-sidecar`, `lite` | Fail-closed egress guard that **captures**: REDIRECTs external TCP that bypasses the forward proxy to AuthBridge's transparent listener; DROPs non-TCP external egress. |
+| `enforce-redirect` | `proxy-sidecar`, `lite` | Fail-closed egress guard that **captures**: REDIRECTs bypassing TCP — external **and** in-cluster (except in-cluster DNS) — to AuthBridge's transparent listener; DROPs non-TCP external egress; leaves in-cluster non-TCP (DNS/UDP) direct. |
 
 ## `redirect` mode (envoy-sidecar)
 
@@ -48,39 +48,50 @@ nat-table target but the nat table forbids `DROP` (`iptables` errors with
 
 - **`nat` OUTPUT / `AB_REDIRECT`** (position 1): `RETURN` ztunnel mark
   `0x539`, the proxy UID (`--uid-owner $PROXY_UID`, avoids the loop),
-  loopback, and `CLUSTER_CIDRS`; then `REDIRECT` external **TCP** to
-  `TRANSPARENT_PORT`.
+  loopback, and in-cluster **DNS-over-TCP** (`-p tcp --dport 53` to
+  `CLUSTER_CIDRS`, so cluster name resolution stays direct); then
+  `REDIRECT` all remaining **TCP** — external **and** in-cluster — to
+  `TRANSPARENT_PORT`, so agent→in-cluster calls (e.g. agent→tool) are
+  captured by the egress pipeline too.
 - **`mangle` OUTPUT / `AB_NOTCP`** (position 1): the same exemptions
   (plus `ESTABLISHED,RELATED` first, so UDP conntrack replies like DNS
-  pass), then `-p tcp -j RETURN` (TCP is handled by the nat REDIRECT) and
-  a terminal `DROP` for external **non-TCP** (UDP/QUIC), so HTTP/3 cannot
-  bypass — well-behaved clients fall back to TCP and get captured.
+  pass), **including the full `CLUSTER_CIDRS` `RETURN`** so in-cluster
+  non-TCP (DNS-over-UDP and any other in-cluster UDP) stays direct; then
+  `-p tcp -j RETURN` (TCP is handled by the nat REDIRECT) and a terminal
+  `DROP` for external **non-TCP** (UDP/QUIC), so HTTP/3 cannot bypass —
+  well-behaved clients fall back to TCP and get captured.
 
 Because the OUTPUT hook order is `raw → mangle → nat → filter`, the
 mangle chain drops non-TCP on its original destination while TCP falls
 through to the nat REDIRECT. Both chains are inserted at position 1,
-ahead of Istio's appended (`-A`) chains, so they preempt ambient's nat
-redirect for external destinations — exactly as `redirect` mode does for
-the Envoy path. IPv6 mirrors apply the same rules. See
+ahead of Istio's appended (`-A`) chains. The proxy's own re-originated
+egress (`--uid-owner $PROXY_UID`, `RETURN`ed) falls through to
+`ISTIO_OUTPUT` → ztunnel for transport mTLS under Istio ambient, and goes
+out plain without a mesh — so capturing in-cluster TCP **composes with**
+the mesh (AuthBridge does L7, ztunnel does transport) rather than
+bypassing it. IPv6 mirrors apply the same rules. See
 [`test-enforce-redirect.sh`](./test-enforce-redirect.sh), which proves
 the capture, the preemption, and the non-TCP drop via packet counters.
 
-> **`CLUSTER_CIDRS` is Kind-shaped by default.** The `10.0.0.0/8` default
-> covers Kind (pods `10.244.0.0/16` + services `10.96.0.0/16`). Other
-> distros differ — **OpenShift** uses services `172.30.0.0/16` and pods
-> `10.128.0.0/14`, and `172.30.0.0/16` is **outside** `10/8`, so the
-> default would drop in-cluster service traffic. On OCP/EKS/etc. you
-> **must** override `CLUSTER_CIDRS` with the cluster's real pod+service
-> ranges. The script logs the resolved value at startup, and the
-> operator sets it from the cluster's CIDRs.
+> **`CLUSTER_CIDRS` is Kind-shaped by default.** It now governs only what
+> stays **direct**: in-cluster DNS-over-TCP (`tcp/53`) and in-cluster
+> non-TCP (so cluster DNS keeps working). The `10.0.0.0/8` default covers
+> Kind (pods `10.244.0.0/16` + services `10.96.0.0/16`). Other distros
+> differ — **OpenShift** uses services `172.30.0.0/16` and pods
+> `10.128.0.0/14`, and `172.30.0.0/16` is **outside** `10/8`, so with the
+> default, cluster DNS (CoreDNS on `172.30.x`) is no longer left direct and
+> **resolution breaks**. On OCP/EKS/etc. you **must** override
+> `CLUSTER_CIDRS` with the cluster's real pod+service ranges. The script
+> logs the resolved value at startup, and the operator sets it from the
+> cluster's CIDRs.
 
 > **`enforce-redirect` intentionally ignores `OUTBOUND_PORTS_EXCLUDE`** (a
 > `redirect`-mode knob). Any destination previously bypassed that way —
 > e.g. a direct LLM endpoint at `host.docker.internal:11434` — is now
-> captured (external TCP) or dropped (external non-TCP) unless it falls
-> within `CLUSTER_CIDRS`. That is the point: `enforce-redirect` closes
-> direct-egress holes. Operators relying on a bypass for an in-cluster
-> target must include it in `CLUSTER_CIDRS`.
+> captured (external TCP) or dropped (external non-TCP). In-cluster TCP is
+> captured as well (only in-cluster DNS stays direct), so `CLUSTER_CIDRS`
+> is **not** a TCP bypass — it only keeps cluster DNS and in-cluster UDP
+> direct. That is the point: `enforce-redirect` closes direct-egress holes.
 
 ## iptables backend
 
@@ -100,7 +111,7 @@ whichever the host kernel exposes. Override with `IPTABLES_CMD` (and
 | `OUTBOUND_PORTS_EXCLUDE` | (empty) | redirect | Comma-separated outbound port list to skip (e.g. `8080`) |
 | `INBOUND_PORTS_EXCLUDE` | (empty) | redirect | Comma-separated inbound port list to skip |
 | `POD_IP` | (required in `redirect`) | redirect | Set via Downward API; DNAT target for ambient-mesh inbound. Not used by `enforce-redirect`. |
-| `CLUSTER_CIDRS` | `10.0.0.0/8` | enforce-redirect | Comma-separated in-cluster CIDRs allowed direct (pods/services/DNS) |
+| `CLUSTER_CIDRS` | `10.0.0.0/8` | enforce-redirect | Comma-separated in-cluster CIDRs kept direct **for DNS only**: DNS-over-TCP (`tcp/53`) + all in-cluster non-TCP (UDP). Other in-cluster TCP is captured. |
 | `CLUSTER_CIDRS6` | (empty) | enforce-redirect | IPv6 in-cluster CIDRs (dual-stack); empty drops all external v6 egress |
 | `IPTABLES_CMD` | auto-detected | all | Override iptables binary (`iptables-legacy` / `iptables-nft`) |
 | `IP6TABLES_CMD` | derived from `IPTABLES_CMD` | enforce-redirect | Override ip6tables binary |
