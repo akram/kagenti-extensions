@@ -178,15 +178,28 @@ SSH_PORT="${SSH_PORT:-22}"
 OUTBOUND_PORTS_EXCLUDE="${OUTBOUND_PORTS_EXCLUDE:-}"
 INBOUND_PORTS_EXCLUDE="${INBOUND_PORTS_EXCLUDE:-}"
 
-# enforce-redirect mode: in-cluster CIDRs used to keep cluster DNS resolution
-# working — in-cluster DNS-over-TCP (TCP/53) and in-cluster non-TCP (UDP, incl.
-# DNS) are left direct, while all OTHER in-cluster TCP is now captured by the
-# egress pipeline so agent->in-cluster calls (e.g. agent->tool) are seen.
-# Defaults to the RFC1918 10/8 block (typical Kind pod 10.244/16 + service
-# 10.96/16); override with the cluster's actual ranges (e.g. OpenShift
-# 172.30.0.0/16) so cluster DNS is not captured.
-CLUSTER_CIDRS="${CLUSTER_CIDRS:-10.0.0.0/8}"
-CLUSTER_CIDRS6="${CLUSTER_CIDRS6:-}"   # IPv6 in-cluster CIDRs (dual-stack); empty = none
+# enforce-redirect mode: under the egress guard, cluster DNS must stay direct
+# (the forward proxy is HTTP-only and cannot carry DNS), while every other
+# in-cluster TCP flow is captured by the pipeline. Rather than guess in-cluster
+# CIDRs — the resolver may sit OUTSIDE them (OpenShift service net 172.30/172.31,
+# outside 10/8) or at a link-local address (NodeLocal DNSCache, 169.254.x) — we
+# read the pod's actual resolvers from /etc/resolv.conf and leave only DNS
+# (UDP/53 + TCP/53) to THOSE IPs direct. kubelet writes resolv.conf per the pod's
+# dnsPolicy, so it is the authoritative, cluster-agnostic source for "where is my
+# resolver". Override the path with RESOLV_CONF (e.g. for tests).
+RESOLV_CONF="${RESOLV_CONF:-/etc/resolv.conf}"
+
+# Emit the `nameserver` IPs from resolv.conf, one per line (IPv4 and IPv6 mixed;
+# callers split by address family). Empty output if the file is missing/unreadable.
+get_nameservers() {
+  [ -r "${RESOLV_CONF}" ] || return 0
+  while read -r _key _val _rest; do
+    [ "${_key}" = "nameserver" ] && [ -n "${_val}" ] && echo "${_val}"
+  done < "${RESOLV_CONF}"
+  # `read` returns non-zero at EOF; force success so `NS=$(get_nameservers)`
+  # under `set -e` does not abort the script (missing/empty resolv.conf is fine).
+  return 0
+}
 
 # IPv6 counterpart of the detected iptables backend (iptables-legacy ->
 # ip6tables-legacy, iptables -> ip6tables). Override with IP6TABLES_CMD.
@@ -228,11 +241,12 @@ fi
 # Rule order: RETURN ztunnel's own sockets (fwmark 0x539, no-op without ambient)
 # -> RETURN the proxy's own re-originated egress (PROXY_UID, avoids the loop) ->
 # RETURN loopback (app -> forward proxy via HTTP_PROXY, and any loopback) ->
-# RETURN in-cluster DNS-over-TCP (TCP/53 to CLUSTER_CIDRS, left direct) ->
+# RETURN DNS-over-TCP (TCP/53) to the resolv.conf nameservers (left direct) ->
 # REDIRECT all remaining TCP -- external AND in-cluster -- to TRANSPARENT_PORT
-# (so agent->in-cluster calls are captured too) -> DROP all other external
-# egress (UDP/QUIC, so HTTP/3 can't bypass; clients fall back to TCP). In-cluster
-# non-TCP (UDP, incl. DNS) is left direct by the mangle chain below.
+# (so agent->in-cluster calls are captured too) -> DROP all other egress
+# (UDP/QUIC, so HTTP/3 can't bypass; clients fall back to TCP). DNS-over-UDP
+# (UDP/53) to the resolvers is left direct by the mangle chain below; all other
+# non-TCP -- including non-DNS in-cluster UDP -- is dropped.
 #
 # The nat REDIRECT chain has no conntrack ESTABLISHED rule: nat only evaluates
 # the first packet of a flow, so replies and established connections are not
@@ -250,9 +264,14 @@ setup_enforce_redirect() {
   REDIR_CHAIN="AB_REDIRECT"
   NOTCP_CHAIN="AB_NOTCP"
 
+  NAMESERVERS=$(get_nameservers)
+  if [ -z "${NAMESERVERS}" ]; then
+    echo "enforce-redirect: WARNING: no nameservers found in ${RESOLV_CONF} — cluster DNS may break (UDP/53 dropped, TCP/53 captured)"
+  fi
+
   echo "enforce-redirect: installing fail-closed egress capture"
   echo "enforce-redirect: external TCP -> 127.0.0.1:${TRANSPARENT_PORT} (nat REDIRECT); external non-TCP -> DROP (mangle)"
-  echo "enforce-redirect: exempt proxy UID=${PROXY_UID}; in-cluster TCP captured (DNS/53 + non-TCP left direct; CIDRs=${CLUSTER_CIDRS})"
+  echo "enforce-redirect: exempt proxy UID=${PROXY_UID}; in-cluster TCP captured; DNS/53 to resolvers left direct (resolvers=$(echo "${NAMESERVERS}" | tr '\n' ' '))"
 
   # --- IPv4: nat REDIRECT for TCP ---
   ${IPT} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
@@ -265,13 +284,15 @@ setup_enforce_redirect() {
   # app -> forward proxy over loopback (HTTP_PROXY target), and any loopback.
   ${IPT} -t nat -A "${REDIR_CHAIN}" -o lo -j RETURN
   ${IPT} -t nat -A "${REDIR_CHAIN}" -d 127.0.0.0/8 -j RETURN
-  # in-cluster DNS-over-TCP (TCP/53) — left direct so cluster name resolution is
-  # not captured. All OTHER in-cluster TCP falls through to the REDIRECT below,
-  # so the egress pipeline sees agent->in-cluster calls (e.g. agent->tool). The
-  # proxy's re-originated egress (PROXY_UID, RETURNed above) is exempt, and in an
-  # Istio ambient mesh it falls through to ISTIO_OUTPUT -> ztunnel for mTLS.
-  for cidr in $(echo "${CLUSTER_CIDRS}" | tr ',' ' '); do
-    [ -n "${cidr}" ] && ${IPT} -t nat -A "${REDIR_CHAIN}" -p tcp --dport 53 -d "${cidr}" -j RETURN
+  # DNS-over-TCP (TCP/53) to the pod's resolvers — left direct so cluster name
+  # resolution is not captured (the forward proxy can't carry DNS). All OTHER
+  # in-cluster TCP falls through to the REDIRECT below, so the egress pipeline
+  # sees agent->in-cluster calls (e.g. agent->tool). The proxy's re-originated
+  # egress (PROXY_UID, RETURNed above) is exempt, and in an Istio ambient mesh it
+  # falls through to ISTIO_OUTPUT -> ztunnel for mTLS.
+  for ns in ${NAMESERVERS}; do
+    case "${ns}" in *:*) continue ;; esac   # IPv6 resolver — handled in the v6 block
+    ${IPT} -t nat -A "${REDIR_CHAIN}" -p tcp --dport 53 -d "${ns}" -j RETURN
   done
   # all remaining TCP (external + in-cluster, minus in-cluster DNS) — capture it transparently.
   ${IPT} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
@@ -288,11 +309,13 @@ setup_enforce_redirect() {
   ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
   ${IPT} -t mangle -A "${NOTCP_CHAIN}" -o lo -j RETURN
   ${IPT} -t mangle -A "${NOTCP_CHAIN}" -d 127.0.0.0/8 -j RETURN
-  # in-cluster non-TCP (UDP, incl. DNS) — left direct. In-cluster TCP is now
-  # captured by the nat chain above; only in-cluster UDP relies on this RETURN
-  # (notably DNS-over-UDP, which the terminal DROP below would otherwise kill).
-  for cidr in $(echo "${CLUSTER_CIDRS}" | tr ',' ' '); do
-    [ -n "${cidr}" ] && ${IPT} -t mangle -A "${NOTCP_CHAIN}" -d "${cidr}" -j RETURN
+  # DNS-over-UDP (UDP/53) to the pod's resolvers — left direct (the terminal DROP
+  # below would otherwise kill cluster name resolution). Scoped to the resolvers
+  # and port 53: all other non-TCP, including non-DNS in-cluster UDP, is dropped
+  # so nothing can bypass the pipeline over UDP.
+  for ns in ${NAMESERVERS}; do
+    case "${ns}" in *:*) continue ;; esac   # IPv6 resolver — handled in the v6 block
+    ${IPT} -t mangle -A "${NOTCP_CHAIN}" -p udp --dport 53 -d "${ns}" -j RETURN
   done
   # TCP is handled by the nat REDIRECT above — let it pass mangle untouched.
   ${IPT} -t mangle -A "${NOTCP_CHAIN}" -p tcp -j RETURN
@@ -304,9 +327,9 @@ setup_enforce_redirect() {
   echo "enforce-redirect: IPv4 egress capture configured"
 
   # --- IPv6 ---
-  # Mirror of IPv4. Until v6 cluster CIDRs are wired (CLUSTER_CIDRS6), allow
-  # loopback + link-local (fe80::/10 unicast, ff02::/16 NDP/MLD multicast) and
-  # the proxy UID / ztunnel mark; REDIRECT external v6 TCP; DROP other v6 egress.
+  # Mirror of IPv4: allow loopback + link-local (fe80::/10 unicast, ff02::/16
+  # NDP/MLD multicast) and the proxy UID / ztunnel mark; leave DNS to any IPv6
+  # resolv.conf nameservers direct; REDIRECT external v6 TCP; DROP other v6 egress.
   if command -v "${IP6T%% *}" >/dev/null 2>&1 && ${IP6T} -t nat -L >/dev/null 2>&1; then
     ${IP6T} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
     ${IP6T} -t nat -F "${REDIR_CHAIN}"
@@ -316,10 +339,11 @@ setup_enforce_redirect() {
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ::1/128 -j RETURN
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -d fe80::/10 -j RETURN
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ff02::/16 -j RETURN
-    # in-cluster DNS-over-TCP (TCP/53) only — mirror of IPv4; all other in-cluster
-    # v6 TCP is captured below.
-    for cidr in $(echo "${CLUSTER_CIDRS6}" | tr ',' ' '); do
-      [ -n "${cidr}" ] && ${IP6T} -t nat -A "${REDIR_CHAIN}" -p tcp --dport 53 -d "${cidr}" -j RETURN
+    # DNS-over-TCP (TCP/53) to IPv6 resolvers only — mirror of IPv4; all other
+    # in-cluster v6 TCP is captured below.
+    for ns in ${NAMESERVERS}; do
+      case "${ns}" in *:*) ;; *) continue ;; esac   # IPv4 resolver — handled in the v4 block
+      ${IP6T} -t nat -A "${REDIR_CHAIN}" -p tcp --dport 53 -d "${ns}" -j RETURN
     done
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
     if ! ${IP6T} -t nat -C OUTPUT -j "${REDIR_CHAIN}" 2>/dev/null; then
@@ -335,8 +359,10 @@ setup_enforce_redirect() {
     ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d ::1/128 -j RETURN
     ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d fe80::/10 -j RETURN
     ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d ff02::/16 -j RETURN
-    for cidr in $(echo "${CLUSTER_CIDRS6}" | tr ',' ' '); do
-      [ -n "${cidr}" ] && ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d "${cidr}" -j RETURN
+    # DNS-over-UDP (UDP/53) to IPv6 resolvers only — mirror of IPv4.
+    for ns in ${NAMESERVERS}; do
+      case "${ns}" in *:*) ;; *) continue ;; esac   # IPv4 resolver — handled in the v4 block
+      ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -p udp --dport 53 -d "${ns}" -j RETURN
     done
     ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -p tcp -j RETURN
     ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -j DROP
