@@ -48,18 +48,19 @@ nat-table target but the nat table forbids `DROP` (`iptables` errors with
 
 - **`nat` OUTPUT / `AB_REDIRECT`** (position 1): `RETURN` ztunnel mark
   `0x539`, the proxy UID (`--uid-owner $PROXY_UID`, avoids the loop),
-  loopback, and in-cluster **DNS-over-TCP** (`-p tcp --dport 53` to
-  `CLUSTER_CIDRS`, so cluster name resolution stays direct); then
-  `REDIRECT` all remaining **TCP** — external **and** in-cluster — to
+  loopback, and **DNS-over-TCP** (`-p tcp --dport 53`) to each
+  `/etc/resolv.conf` nameserver (so cluster name resolution stays direct);
+  then `REDIRECT` all remaining **TCP** — external **and** in-cluster — to
   `TRANSPARENT_PORT`, so agent→in-cluster calls (e.g. agent→tool) are
   captured by the egress pipeline too.
-- **`mangle` OUTPUT / `AB_NOTCP`** (position 1): the same exemptions
-  (plus `ESTABLISHED,RELATED` first, so UDP conntrack replies like DNS
-  pass), **including the full `CLUSTER_CIDRS` `RETURN`** so in-cluster
-  non-TCP (DNS-over-UDP and any other in-cluster UDP) stays direct; then
-  `-p tcp -j RETURN` (TCP is handled by the nat REDIRECT) and a terminal
-  `DROP` for external **non-TCP** (UDP/QUIC), so HTTP/3 cannot bypass —
-  well-behaved clients fall back to TCP and get captured.
+- **`mangle` OUTPUT / `AB_NOTCP`** (position 1): the same UID/mark/loopback
+  exemptions (plus `ESTABLISHED,RELATED` first, so UDP conntrack replies
+  like DNS pass), then **DNS-over-UDP** (`-p udp --dport 53`) to each
+  resolv.conf nameserver so cluster DNS keeps working; then `-p tcp -j
+  RETURN` (TCP is handled by the nat REDIRECT) and a terminal `DROP` for
+  all other **non-TCP** (UDP/QUIC), so HTTP/3 cannot bypass and non-DNS
+  in-cluster UDP is dropped too — well-behaved clients fall back to TCP and
+  get captured.
 
 Because the OUTPUT hook order is `raw → mangle → nat → filter`, the
 mangle chain drops non-TCP on its original destination while TCP falls
@@ -73,25 +74,26 @@ bypassing it. IPv6 mirrors apply the same rules. See
 [`test-enforce-redirect.sh`](./test-enforce-redirect.sh), which proves
 the capture, the preemption, and the non-TCP drop via packet counters.
 
-> **`CLUSTER_CIDRS` is Kind-shaped by default.** It now governs only what
-> stays **direct**: in-cluster DNS-over-TCP (`tcp/53`) and in-cluster
-> non-TCP (so cluster DNS keeps working). The `10.0.0.0/8` default covers
-> Kind (pods `10.244.0.0/16` + services `10.96.0.0/16`). Other distros
-> differ — **OpenShift** uses services `172.30.0.0/16` and pods
-> `10.128.0.0/14`, and `172.30.0.0/16` is **outside** `10/8`, so with the
-> default, cluster DNS (CoreDNS on `172.30.x`) is no longer left direct and
-> **resolution breaks**. On OCP/EKS/etc. you **must** override
-> `CLUSTER_CIDRS` with the cluster's real pod+service ranges. The script
-> logs the resolved value at startup, and the operator sets it from the
-> cluster's CIDRs.
+> **DNS stays direct by following the pod's actual resolvers — no CIDR
+> guessing.** The only thing left direct is DNS (`tcp/53` + `udp/53`) to the
+> `nameserver` IPs in `/etc/resolv.conf`, which kubelet writes per the pod's
+> `dnsPolicy`. This is cluster-agnostic by construction: it works whether the
+> resolver is a Kind/OpenShift/EKS service ClusterIP (any service CIDR — incl.
+> OpenShift's `172.30.0.0/16`, which is **outside** `10/8`) or a NodeLocal
+> DNSCache at a link-local `169.254.x` address. The script logs the resolved
+> nameservers at startup; override the file path with `RESOLV_CONF` (mainly
+> for tests). There is **no** in-cluster CIDR knob — `enforce-redirect` no
+> longer needs one. (A prior `CLUSTER_CIDRS` env was removed; its `10.0.0.0/8`
+> default silently dropped DNS on OpenShift, where the resolver sits outside
+> `10/8`.)
 
 > **`enforce-redirect` intentionally ignores `OUTBOUND_PORTS_EXCLUDE`** (a
 > `redirect`-mode knob). Any destination previously bypassed that way —
 > e.g. a direct LLM endpoint at `host.docker.internal:11434` — is now
 > captured (external TCP) or dropped (external non-TCP). In-cluster TCP is
-> captured as well (only in-cluster DNS stays direct), so `CLUSTER_CIDRS`
-> is **not** a TCP bypass — it only keeps cluster DNS and in-cluster UDP
-> direct. That is the point: `enforce-redirect` closes direct-egress holes.
+> captured as well (only DNS to the resolvers stays direct). That is the
+> point: `enforce-redirect` closes direct-egress holes, and the DNS
+> exemption is scoped to `port 53` to the resolver IPs — not a TCP bypass.
 
 ## iptables backend
 
@@ -111,8 +113,7 @@ whichever the host kernel exposes. Override with `IPTABLES_CMD` (and
 | `OUTBOUND_PORTS_EXCLUDE` | (empty) | redirect | Comma-separated outbound port list to skip (e.g. `8080`) |
 | `INBOUND_PORTS_EXCLUDE` | (empty) | redirect | Comma-separated inbound port list to skip |
 | `POD_IP` | (required in `redirect`) | redirect | Set via Downward API; DNAT target for ambient-mesh inbound. Not used by `enforce-redirect`. |
-| `CLUSTER_CIDRS` | `10.0.0.0/8` | enforce-redirect | Comma-separated in-cluster CIDRs kept direct **for DNS only**: DNS-over-TCP (`tcp/53`) + all in-cluster non-TCP (UDP). Other in-cluster TCP is captured. |
-| `CLUSTER_CIDRS6` | (empty) | enforce-redirect | IPv6 in-cluster CIDRs (dual-stack); empty drops all external v6 egress |
+| `RESOLV_CONF` | `/etc/resolv.conf` | enforce-redirect | Path read at init for `nameserver` IPs; DNS (`tcp/53` + `udp/53`) to those IPs is left direct (IPv4→`iptables`, IPv6→`ip6tables`). Override mainly for tests. |
 | `IPTABLES_CMD` | auto-detected | all | Override iptables binary (`iptables-legacy` / `iptables-nft`) |
 | `IP6TABLES_CMD` | derived from `IPTABLES_CMD` | enforce-redirect | Override ip6tables binary |
 
