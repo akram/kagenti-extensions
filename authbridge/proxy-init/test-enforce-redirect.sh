@@ -8,7 +8,8 @@
 #      position 1 with the expected RETURN exemptions and a `-p tcp` REDIRECT to
 #      TRANSPARENT_PORT (no DROP — the nat table forbids it); and the AB_NOTCP
 #      chain is hooked from mangle OUTPUT with `-p tcp RETURN` then a terminal
-#      DROP for external non-TCP egress.
+#      DROP for external non-TCP egress. In-cluster DNS-over-TCP (TCP/53) is left
+#      direct; all OTHER in-cluster TCP is captured (no blanket in-cluster RETURN).
 #   2. CAPTURE (not drop) + AMBIENT ROBUSTNESS — external TCP egress is
 #      REDIRECTed to TRANSPARENT_PORT, preempting a simulated Istio ambient
 #      "nat OUTPUT REDIRECT" appended after our chain. Proven via packet
@@ -65,7 +66,13 @@ assert "nat ztunnel mark RETURN"            'AB_REDIRECT .*mark.*0x539.*-j RETUR
 assert "nat proxy UID RETURN"               'AB_REDIRECT .*--uid-owner 1337 -j RETURN' "${natdump}"
 assert "nat loopback iface RETURN"          'AB_REDIRECT -o lo -j RETURN' "${natdump}"
 assert "nat loopback cidr RETURN"           'AB_REDIRECT -d 127.0.0.0/8 -j RETURN' "${natdump}"
-assert "nat cluster cidr RETURN"            'AB_REDIRECT -d 10.0.0.0/8 -j RETURN' "${natdump}"
+# in-cluster DNS-over-TCP (TCP/53) is left direct so cluster name resolution is
+# not captured; all OTHER in-cluster TCP now falls through to the REDIRECT.
+assert "nat in-cluster DNS-over-TCP RETURN" 'AB_REDIRECT.*10\.0\.0\.0/8.*dport 53.*RETURN' "${natdump}"
+# the blanket in-cluster RETURN must be gone — in-cluster TCP is now captured.
+if echo "${natdump}" | grep -qE '^-A AB_REDIRECT -d 10\.0\.0\.0/8 -j RETURN$'; then
+  echo "FAIL: nat AB_REDIRECT still blanket-RETURNs in-cluster (in-cluster TCP not captured)"; fail=1
+else echo "PASS: no blanket in-cluster RETURN — in-cluster TCP captured, only DNS/53 left direct"; fi
 assert "nat tcp REDIRECT to transparent"    "AB_REDIRECT -p tcp -j REDIRECT --to-ports ${TPORT}" "${natdump}"
 if echo "${natdump}" | grep -qE 'AB_REDIRECT -j DROP'; then
   echo "FAIL: nat AB_REDIRECT must not contain DROP (nat table forbids it)"; fail=1

@@ -178,11 +178,13 @@ SSH_PORT="${SSH_PORT:-22}"
 OUTBOUND_PORTS_EXCLUDE="${OUTBOUND_PORTS_EXCLUDE:-}"
 INBOUND_PORTS_EXCLUDE="${INBOUND_PORTS_EXCLUDE:-}"
 
-# enforce-redirect mode: in-cluster destinations the agent may reach directly
-# (pods / services / DNS) — external TCP is REDIRECTed to the transparent
-# listener and external non-TCP is dropped. Defaults to the RFC1918 10/8 block
-# which covers typical Kind pod (10.244/16) and service (10.96/16) CIDRs;
-# override with the cluster's actual ranges.
+# enforce-redirect mode: in-cluster CIDRs used to keep cluster DNS resolution
+# working — in-cluster DNS-over-TCP (TCP/53) and in-cluster non-TCP (UDP, incl.
+# DNS) are left direct, while all OTHER in-cluster TCP is now captured by the
+# egress pipeline so agent->in-cluster calls (e.g. agent->tool) are seen.
+# Defaults to the RFC1918 10/8 block (typical Kind pod 10.244/16 + service
+# 10.96/16); override with the cluster's actual ranges (e.g. OpenShift
+# 172.30.0.0/16) so cluster DNS is not captured.
 CLUSTER_CIDRS="${CLUSTER_CIDRS:-10.0.0.0/8}"
 CLUSTER_CIDRS6="${CLUSTER_CIDRS6:-}"   # IPv6 in-cluster CIDRs (dual-stack); empty = none
 
@@ -226,9 +228,11 @@ fi
 # Rule order: RETURN ztunnel's own sockets (fwmark 0x539, no-op without ambient)
 # -> RETURN the proxy's own re-originated egress (PROXY_UID, avoids the loop) ->
 # RETURN loopback (app -> forward proxy via HTTP_PROXY, and any loopback) ->
-# RETURN in-cluster CIDRs (mesh/DNS, left direct) -> REDIRECT external TCP to
-# TRANSPARENT_PORT -> DROP all other external egress (UDP/QUIC, so HTTP/3 can't
-# bypass; well-behaved clients fall back to TCP and get captured).
+# RETURN in-cluster DNS-over-TCP (TCP/53 to CLUSTER_CIDRS, left direct) ->
+# REDIRECT all remaining TCP -- external AND in-cluster -- to TRANSPARENT_PORT
+# (so agent->in-cluster calls are captured too) -> DROP all other external
+# egress (UDP/QUIC, so HTTP/3 can't bypass; clients fall back to TCP). In-cluster
+# non-TCP (UDP, incl. DNS) is left direct by the mangle chain below.
 #
 # The nat REDIRECT chain has no conntrack ESTABLISHED rule: nat only evaluates
 # the first packet of a flow, so replies and established connections are not
@@ -248,7 +252,7 @@ setup_enforce_redirect() {
 
   echo "enforce-redirect: installing fail-closed egress capture"
   echo "enforce-redirect: external TCP -> 127.0.0.1:${TRANSPARENT_PORT} (nat REDIRECT); external non-TCP -> DROP (mangle)"
-  echo "enforce-redirect: exempt proxy UID=${PROXY_UID}; direct in-cluster CIDRs=${CLUSTER_CIDRS}"
+  echo "enforce-redirect: exempt proxy UID=${PROXY_UID}; in-cluster TCP captured (DNS/53 + non-TCP left direct; CIDRs=${CLUSTER_CIDRS})"
 
   # --- IPv4: nat REDIRECT for TCP ---
   ${IPT} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
@@ -261,11 +265,15 @@ setup_enforce_redirect() {
   # app -> forward proxy over loopback (HTTP_PROXY target), and any loopback.
   ${IPT} -t nat -A "${REDIR_CHAIN}" -o lo -j RETURN
   ${IPT} -t nat -A "${REDIR_CHAIN}" -d 127.0.0.0/8 -j RETURN
-  # in-cluster traffic (pods / services / DNS) — left direct, carried by the mesh.
+  # in-cluster DNS-over-TCP (TCP/53) — left direct so cluster name resolution is
+  # not captured. All OTHER in-cluster TCP falls through to the REDIRECT below,
+  # so the egress pipeline sees agent->in-cluster calls (e.g. agent->tool). The
+  # proxy's re-originated egress (PROXY_UID, RETURNed above) is exempt, and in an
+  # Istio ambient mesh it falls through to ISTIO_OUTPUT -> ztunnel for mTLS.
   for cidr in $(echo "${CLUSTER_CIDRS}" | tr ',' ' '); do
-    [ -n "${cidr}" ] && ${IPT} -t nat -A "${REDIR_CHAIN}" -d "${cidr}" -j RETURN
+    [ -n "${cidr}" ] && ${IPT} -t nat -A "${REDIR_CHAIN}" -p tcp --dport 53 -d "${cidr}" -j RETURN
   done
-  # external TCP that bypassed the forward proxy — capture it transparently.
+  # all remaining TCP (external + in-cluster, minus in-cluster DNS) — capture it transparently.
   ${IPT} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
   if ! ${IPT} -t nat -C OUTPUT -j "${REDIR_CHAIN}" 2>/dev/null; then
     ${IPT} -t nat -I OUTPUT 1 -j "${REDIR_CHAIN}"
@@ -280,6 +288,9 @@ setup_enforce_redirect() {
   ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
   ${IPT} -t mangle -A "${NOTCP_CHAIN}" -o lo -j RETURN
   ${IPT} -t mangle -A "${NOTCP_CHAIN}" -d 127.0.0.0/8 -j RETURN
+  # in-cluster non-TCP (UDP, incl. DNS) — left direct. In-cluster TCP is now
+  # captured by the nat chain above; only in-cluster UDP relies on this RETURN
+  # (notably DNS-over-UDP, which the terminal DROP below would otherwise kill).
   for cidr in $(echo "${CLUSTER_CIDRS}" | tr ',' ' '); do
     [ -n "${cidr}" ] && ${IPT} -t mangle -A "${NOTCP_CHAIN}" -d "${cidr}" -j RETURN
   done
@@ -305,8 +316,10 @@ setup_enforce_redirect() {
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ::1/128 -j RETURN
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -d fe80::/10 -j RETURN
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ff02::/16 -j RETURN
+    # in-cluster DNS-over-TCP (TCP/53) only — mirror of IPv4; all other in-cluster
+    # v6 TCP is captured below.
     for cidr in $(echo "${CLUSTER_CIDRS6}" | tr ',' ' '); do
-      [ -n "${cidr}" ] && ${IP6T} -t nat -A "${REDIR_CHAIN}" -d "${cidr}" -j RETURN
+      [ -n "${cidr}" ] && ${IP6T} -t nat -A "${REDIR_CHAIN}" -p tcp --dport 53 -d "${cidr}" -j RETURN
     done
     ${IP6T} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
     if ! ${IP6T} -t nat -C OUTPUT -j "${REDIR_CHAIN}" 2>/dev/null; then

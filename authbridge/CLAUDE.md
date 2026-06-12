@@ -62,7 +62,7 @@ authbridge/
 │   ├── Dockerfile                    #   proxy-sidecar lite combined image
 │   └── entrypoint.sh
 │
-├── proxy-init/                       # iptables init container (envoy-sidecar mode only)
+├── proxy-init/                       # iptables init container (envoy-sidecar + proxy-sidecar enforce-redirect modes)
 │   ├── init-iptables.sh              #   iptables setup script
 │   ├── Dockerfile.init               #   proxy-init container image
 │   ├── Makefile                      #   docker-build-init + load-image targets
@@ -350,7 +350,7 @@ without needing a CR.
 ### Build images locally
 
 ```bash
-# Build the proxy-init iptables init container (envoy-sidecar mode only)
+# Build the proxy-init iptables init container (envoy-sidecar + proxy-sidecar enforce-redirect modes)
 cd authbridge/proxy-init
 make docker-build-init
 make load-image                     # Uses KIND_CLUSTER_NAME env var (default: kagenti)
