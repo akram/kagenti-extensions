@@ -156,7 +156,22 @@ detect_iptables_cmd() {
     echo "${IPTABLES_CMD}"
     return
   fi
-  if command -v iptables-legacy >/dev/null 2>&1 && \
+  # Test with a write operation (create + delete a temporary chain) rather than
+  # just listing. On platforms where the iptable_nat kernel module is not loaded
+  # (e.g. ROSA HCP / managed OpenShift using nftables exclusively),
+  # iptables-legacy can list the nat table but fails to create rules with
+  # "can't initialize iptables table 'nat': Permission denied".
+  # Prefer iptables (nft backend) over iptables-legacy. On nftables-only
+  # kernels (ROSA HCP, managed OpenShift), the iptable_nat module is not
+  # loaded and iptables-legacy fails with "can't initialize iptables
+  # table 'nat': Permission denied" — even though basic chain/rule
+  # operations appear to succeed via nft_compat, the full iptables-legacy
+  # nat pipeline is non-functional. The nft backend works natively.
+  # Fall back to iptables-legacy only if iptables (nft) is unavailable.
+  if command -v iptables >/dev/null 2>&1 && \
+     iptables -t nat -L -n >/dev/null 2>&1; then
+    echo "iptables"
+  elif command -v iptables-legacy >/dev/null 2>&1 && \
      iptables-legacy -t nat -L -n >/dev/null 2>&1; then
     echo "iptables-legacy"
   else
