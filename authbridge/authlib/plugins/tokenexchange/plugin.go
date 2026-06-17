@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync/atomic"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
@@ -29,16 +28,37 @@ import (
 // Inline doc comments retain long-form rationale; struct tags carry
 // single-line summaries for templating. See pipeline/schema.go.
 type tokenExchangeConfig struct {
-	// TokenURL is the OAuth token endpoint. Explicit value wins; else
-	// derived from KeycloakURL + KeycloakRealm using Keycloak's
-	// convention.
-	TokenURL string `json:"token_url" description:"OAuth token endpoint URL. Required unless keycloak_url + keycloak_realm are both set (the plugin derives token_url from the pair)."`
+	// TokenURL is the OAuth token endpoint. Explicit value always wins.
+	// When empty, derived from Provider + ProviderURL + ProviderRealm
+	// (or the deprecated keycloak_url + keycloak_realm pair).
+	TokenURL string `json:"token_url" description:"OAuth token endpoint URL. Required unless provider + provider_url (or keycloak_url + keycloak_realm) are set for automatic derivation."`
 
-	// KeycloakURL and KeycloakRealm are a convenience for deriving
-	// TokenURL when the operator prefers to supply Keycloak base + realm
-	// rather than the full token endpoint.
-	KeycloakURL   string `json:"keycloak_url" description:"Internal Keycloak base URL. Required (with keycloak_realm) when token_url is empty."`
-	KeycloakRealm string `json:"keycloak_realm" description:"Keycloak realm name. Required (with keycloak_url) when token_url is empty."`
+	// Provider selects the IdP for automatic endpoint derivation.
+	// Supported: keycloak, entra-id, okta, generic.
+	// When empty and keycloak_url is set, defaults to "keycloak" for
+	// backward compatibility. When "generic" or empty, token_url must
+	// be supplied explicitly.
+	Provider string `json:"provider" description:"IdP provider for endpoint derivation: keycloak, entra-id, okta, or generic." enum:"keycloak,entra-id,okta,generic"`
+
+	// ProviderURL is the IdP base URL used for endpoint derivation.
+	// Interpretation depends on Provider:
+	//   keycloak: internal Keycloak base URL (e.g. https://keycloak.example.com)
+	//   entra-id: ignored (endpoints are derived from ProviderRealm/tenant)
+	//   okta:     Okta domain URL (e.g. https://dev-123.okta.com)
+	ProviderURL string `json:"provider_url" description:"IdP base URL for endpoint derivation. Interpretation varies by provider."`
+
+	// ProviderRealm is the IdP-specific namespace/tenant:
+	//   keycloak: realm name (e.g. kagenti)
+	//   entra-id: tenant ID or domain (e.g. contoso.onmicrosoft.com)
+	//   okta:     authorization server ID (optional, omit for org-level)
+	ProviderRealm string `json:"provider_realm" description:"IdP-specific realm/tenant/auth-server. Keycloak: realm name. Entra ID: tenant ID. Okta: auth server ID (optional)."`
+
+	// KeycloakURL and KeycloakRealm are deprecated aliases for
+	// ProviderURL and ProviderRealm with Provider="keycloak".
+	// Supported for backward compatibility; prefer provider_url +
+	// provider_realm + provider instead.
+	KeycloakURL   string `json:"keycloak_url" description:"DEPRECATED: use provider_url + provider=keycloak instead. Internal Keycloak base URL."`
+	KeycloakRealm string `json:"keycloak_realm" description:"DEPRECATED: use provider_realm + provider=keycloak instead. Keycloak realm name."`
 
 	// DefaultPolicy is applied when a request's host matches no route:
 	// "passthrough" (default) forwards the request unchanged;
@@ -74,28 +94,26 @@ type tokenExchangeIdentity struct {
 	// Type is one of "spiffe" or "client-secret".
 	Type string `json:"type" required:"true" description:"Identity scheme: spiffe (JWT-SVID assertion) or client-secret." enum:"spiffe,client-secret"`
 
-	// ClientID identifies the client in Keycloak. Explicit value wins;
-	// else read from ClientIDFile at Configure time (or by Init if the
-	// file isn't yet available).
-	ClientID     string `json:"client_id" description:"Inline Keycloak client ID. One of client_id or client_id_file is required."`
+	// ClientID identifies the OAuth client at the IdP. Explicit value
+	// wins; else read from ClientIDFile at Configure time (or by Init
+	// if the file isn't yet available).
+	ClientID     string `json:"client_id" description:"OAuth client ID. One of client_id or client_id_file is required."`
 	ClientIDFile string `json:"client_id_file" description:"Read client ID from this file. Default: /shared/client-id.txt."`
 
 	// ClientSecret / ClientSecretFile are the client-secret credentials
 	// (type=client-secret).
-	ClientSecret     string `json:"client_secret" description:"Inline Keycloak client secret (type=client-secret)."`
+	ClientSecret     string `json:"client_secret" description:"OAuth client secret (type=client-secret)."`
 	ClientSecretFile string `json:"client_secret_file" description:"Read client secret from file. Default: /shared/client-secret.txt."`
 
 	// JWTAudience is the audience claim minted on the JWT-SVID used as
 	// the RFC 8693 client assertion. Required when Type=="spiffe";
-	// ignored otherwise. Lives on the plugin (not the framework spiffe
-	// block) because only the spiffe identity path consumes it.
+	// ignored otherwise.
 	JWTAudience string `json:"jwt_audience" description:"Audience claim minted on the JWT-SVID assertion. REQUIRED when type=spiffe; ignored otherwise."`
 
-	// jwt_svid_path was historically a per-plugin path to the JWT-SVID
-	// file written by spiffe-helper. Removed in favor of injection via
-	// the framework spiffe.Provider (see the top-level spiffe block in
-	// authlib/config). T11 wires the Provider into TokenExchange and
-	// supplies the JWTSource directly.
+	// AssertionType is the client_assertion_type URN used with spiffe
+	// identity. Default: urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+	// (supported by Keycloak). Set to jwt-bearer for Okta compatibility.
+	AssertionType string `json:"assertion_type" description:"Client assertion type URN for spiffe identity. Default: jwt-spiffe. Use jwt-bearer for Okta." enum:"jwt-spiffe,jwt-bearer"`
 }
 
 type tokenExchangeRoutes struct {
@@ -120,9 +138,27 @@ type tokenExchangeRoute struct {
 }
 
 func (c *tokenExchangeConfig) applyDefaults() {
-	if c.TokenURL == "" && c.KeycloakURL != "" && c.KeycloakRealm != "" {
-		base := strings.TrimRight(c.KeycloakURL, "/") + "/realms/" + c.KeycloakRealm
-		c.TokenURL = base + "/protocol/openid-connect/token"
+	// Backward compatibility: migrate keycloak_url/keycloak_realm to
+	// provider_url/provider_realm when the new fields are empty.
+	if c.KeycloakURL != "" && c.ProviderURL == "" {
+		c.ProviderURL = c.KeycloakURL
+		if c.Provider == "" {
+			c.Provider = "keycloak"
+		}
+		slog.Warn("token-exchange: keycloak_url is deprecated; use provider_url + provider=keycloak instead")
+	}
+	if c.KeycloakRealm != "" && c.ProviderRealm == "" {
+		c.ProviderRealm = c.KeycloakRealm
+		slog.Warn("token-exchange: keycloak_realm is deprecated; use provider_realm + provider=keycloak instead")
+	}
+
+	// Derive token_url from the registered IdP provider when not set
+	// explicitly. LookupProvider returns nil for unknown/empty names,
+	// which leaves TokenURL empty — validate() will catch it.
+	if c.TokenURL == "" && c.Provider != "" {
+		if p := LookupProvider(c.Provider); p != nil {
+			c.TokenURL = p.TokenEndpoint(c.ProviderURL, c.ProviderRealm)
+		}
 	}
 	if c.DefaultPolicy == "" {
 		c.DefaultPolicy = "passthrough"
@@ -281,7 +317,7 @@ func (p *TokenExchange) Name() string { return "token-exchange" }
 
 func (p *TokenExchange) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		Description: "RFC 8693 outbound token exchange against Keycloak per route.",
+		Description: "RFC 8693 outbound token exchange per route. Supports Keycloak, Entra ID, Okta, and any RFC 8693-compliant IdP.",
 	}
 }
 
@@ -351,7 +387,7 @@ func (p *TokenExchange) Configure(raw json.RawMessage) error {
 
 	jwtSrc := p.jwtSource(c.Identity.JWTAudience)
 	clientAuth, err := buildClientAuthFrom(c.Identity.Type,
-		c.Identity.ClientID, c.Identity.ClientSecret, jwtSrc)
+		c.Identity.ClientID, c.Identity.ClientSecret, c.Identity.AssertionType, jwtSrc)
 	if err != nil {
 		return fmt.Errorf("token-exchange: %w", err)
 	}
@@ -420,15 +456,25 @@ func credentialsAreReady(id tokenExchangeIdentity, jwtSrc fwspiffe.JWTSource) bo
 // the framework spiffe.Provider via SetSPIFFEProvider (see
 // plugins.BuildWithSPIFFE). When the provider hasn't been wired in,
 // this returns an explicit configuration error rather than panicking.
-func buildClientAuthFrom(identityType, clientID, clientSecret string, jwtSrc fwspiffe.JWTSource) (exchange.ClientAuth, error) {
+// assertionTypeURN maps short assertion type names to their full URN.
+var assertionTypeURN = map[string]string{
+	"jwt-spiffe": "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe",
+	"jwt-bearer": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+}
+
+func buildClientAuthFrom(identityType, clientID, clientSecret, assertionType string, jwtSrc fwspiffe.JWTSource) (exchange.ClientAuth, error) {
 	switch identityType {
 	case "spiffe":
 		if jwtSrc == nil {
 			return nil, errors.New("spiffe identity requires a SPIFFE provider to be injected")
 		}
+		urn := assertionTypeURN[assertionType]
+		if urn == "" {
+			urn = assertionTypeURN["jwt-spiffe"] // default
+		}
 		return &exchange.JWTAssertionAuth{
 			ClientID:      clientID,
-			AssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe",
+			AssertionType: urn,
 			TokenSource:   jwtSrc.FetchToken,
 		}, nil
 	case "client-secret":
@@ -535,7 +581,7 @@ func (p *TokenExchange) pollCredentials(ctx context.Context, needID, needSecret 
 		}
 		clientSecret = v
 	}
-	clientAuth, err := buildClientAuthFrom(p.cfg.Identity.Type, clientID, clientSecret, p.jwtSource(p.cfg.Identity.JWTAudience))
+	clientAuth, err := buildClientAuthFrom(p.cfg.Identity.Type, clientID, clientSecret, p.cfg.Identity.AssertionType, p.jwtSource(p.cfg.Identity.JWTAudience))
 	if err != nil {
 		slog.Warn("token-exchange: failed to rebuild client auth after credential load", "error", err)
 		return
