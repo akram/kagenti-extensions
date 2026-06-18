@@ -1,6 +1,6 @@
 # IdP-Agnostic Token Exchange Plugin Contract
 
-> **Status:** Draft — Phase 1 of RHAIENG-5681 / kagenti-extensions#481
+> **Status:** Implemented — RHAIENG-5681 / kagenti-extensions#481
 >
 > This document defines the contract that an Identity Provider (IdP)
 > plugin must satisfy for the AuthBridge token exchange pipeline.
@@ -12,259 +12,170 @@
 The token exchange plugin (`token-exchange`) implements RFC 8693 token
 exchange for outbound requests. The core pipeline is IdP-agnostic:
 
-```
+```text
 Request → Route resolver → Token cache → RFC 8693 exchange → Inject token
 ```
 
-IdP-specific behavior is confined to two extension points:
+IdP-specific behavior is owned by the `IdPProvider` interface. Each
+provider (Keycloak, Entra ID, Okta, etc.) implements this interface
+in its own file and self-registers via `init()`.
 
-1. **Token endpoint resolution** — how to derive the OAuth token endpoint URL
-2. **Client authentication** — how the workload authenticates to the IdP
-
-Everything else (route matching, caching, token injection, error
-handling) is generic and shared.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│                token-exchange plugin             │
-│                                                  │
-│  ┌──────────────┐  ┌─────────────────────────┐  │
-│  │ Route        │  │ exchange.Client          │  │
-│  │ Resolver     │  │ (RFC 8693, IdP-agnostic) │  │
-│  │              │  │                          │  │
-│  │ host → aud   │  │  ┌───────────────────┐   │  │
-│  │ host → scope │  │  │ ClientAuth        │   │  │
-│  │ host → url   │──│  │ (IdP-specific)    │   │  │
-│  │              │  │  │                   │   │  │
-│  └──────────────┘  │  │ • ClientSecretAuth│   │  │
-│                    │  │ • JWTAssertionAuth│   │  │
-│                    │  │ • CertificateAuth │   │  │
-│                    │  │   (future)        │   │  │
-│                    │  └───────────────────┘   │  │
-│                    └─────────────────────────┘  │
-└─────────────────────────────────────────────────┘
-```
-
-## Extension Point 1: Token Endpoint Resolution
-
-### Current state (Keycloak-specific)
+## IdPProvider Interface
 
 ```go
-// plugin.go:122-126
-if c.TokenURL == "" && c.KeycloakURL != "" && c.KeycloakRealm != "" {
-    base := strings.TrimRight(c.KeycloakURL, "/") + "/realms/" + c.KeycloakRealm
-    c.TokenURL = base + "/protocol/openid-connect/token"
+// provider.go
+type IdPProvider interface {
+    Name() string
+    TokenEndpoint(providerURL, providerRealm string) string
+    DefaultAssertionType() string
+    SupportedIdentityTypes() []string
+    BuildClientAuth(identity IdentityConfig, jwtSrc JWTSource) (ClientAuth, error)
 }
 ```
 
-### Proposed contract
+| Method | Purpose |
+|--------|---------|
+| `Name()` | Provider identifier used in config (e.g. `"keycloak"`) |
+| `TokenEndpoint()` | Derives the OAuth token endpoint URL from provider base URL and realm/tenant. Returns `""` if inputs are insufficient. |
+| `DefaultAssertionType()` | Default `client_assertion_type` short name for SPIFFE identity (e.g. `"jwt-spiffe"` for Keycloak, `"jwt-bearer"` for Okta). Returns `""` if JWT assertions are not supported. |
+| `SupportedIdentityTypes()` | Identity types this provider supports (e.g. `["client-secret", "spiffe"]`). Used at `Configure()` to reject unsupported combinations early. |
+| `BuildClientAuth()` | Constructs the provider-appropriate `exchange.ClientAuth` from the identity config. Each provider owns its auth strategy. |
 
-The plugin resolves the token endpoint URL via a **resolution chain**:
+## Adding a New IdP Provider
 
-1. **Explicit `token_url`** — always wins (works for any IdP)
-2. **Provider-specific derivation** — when `provider` is set and `token_url` is empty
-3. **Per-route `token_url` override** — in `routes.yaml`, per-host
+Create a single file — no changes to core plugin code required:
 
-#### Configuration
+```go
+// provider_okta.go
+package tokenexchange
+
+import (
+    "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
+    fwspiffe "github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
+)
+
+type oktaProvider struct{}
+
+func (oktaProvider) Name() string { return "okta" }
+
+func (oktaProvider) TokenEndpoint(providerURL, providerRealm string) string {
+    // Okta URL derivation logic
+}
+
+func (oktaProvider) DefaultAssertionType() string { return JWTBearerAssertion }
+
+func (oktaProvider) SupportedIdentityTypes() []string {
+    return []string{ClientSecretIdentity, SpiffeIdentity}
+}
+
+func (oktaProvider) BuildClientAuth(id IdentityConfig, jwtSrc fwspiffe.JWTSource) (exchange.ClientAuth, error) {
+    // Okta-specific auth construction
+}
+
+func init() { RegisterProvider(oktaProvider{}) }
+```
+
+The `init()` auto-registration pattern means any provider file compiled
+into the binary is automatically available — no central list to maintain.
+A CI test (`TestAllProviderFilesAreRegistered`) scans `provider_*.go`
+files and verifies each has `RegisterProvider()` in `init()`.
+
+## Configuration
 
 ```yaml
 token-exchange:
-  # Explicit URL (works for any IdP, recommended for production)
+  # Explicit URL (works for any IdP, always wins)
   token_url: "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 
-  # OR: provider-assisted derivation (convenience for supported IdPs)
-  provider: "keycloak"       # keycloak | entra-id | okta | generic
+  # OR: provider-assisted derivation (convenience for registered IdPs)
+  provider: "keycloak"       # must be a registered provider name
   provider_url: "https://keycloak.example.com"
-  provider_realm: "my-realm" # keycloak-specific, ignored by other providers
+  provider_realm: "my-realm"
 
   identity:
-    type: "client-secret"    # client-secret | spiffe | certificate (future)
+    type: "client-secret"    # must be in provider's SupportedIdentityTypes()
     client_id: "my-agent"
     client_secret: "..."
+    # assertion_type: "jwt-bearer"  # optional, defaults to provider's DefaultAssertionType()
 ```
 
-#### Provider URL derivation patterns
+### Resolution chain
 
-| Provider | `token_url` derivation | `jwks_url` derivation |
-|----------|----------------------|---------------------|
-| `keycloak` | `{provider_url}/realms/{provider_realm}/protocol/openid-connect/token` | `{provider_url}/realms/{provider_realm}/protocol/openid-connect/certs` |
-| `entra-id` | `https://login.microsoftonline.com/{provider_realm}/oauth2/v2.0/token` | `https://login.microsoftonline.com/{provider_realm}/discovery/v2.0/keys` |
-| `okta` | `{provider_url}/oauth2/v1/token` | `{provider_url}/oauth2/v1/keys` |
-| `generic` | **must** supply explicit `token_url` | **must** supply explicit `jwks_url` |
+1. **Explicit `token_url`** — always wins (works for any IdP)
+2. **Provider derivation** — `LookupProvider(provider).TokenEndpoint(url, realm)`
+3. **Per-route `token_url` override** — in `routes.yaml`, per-host
 
-`provider_realm` is overloaded per IdP:
-- **Keycloak:** realm name (e.g., `kagenti`)
-- **Entra ID:** tenant ID or domain (e.g., `contoso.onmicrosoft.com`)
-- **Okta:** authorization server ID (optional, omit for org-level)
-
-#### Backward compatibility
+### Backward compatibility
 
 `keycloak_url` and `keycloak_realm` continue to work. When present
 and `provider` is not set, the plugin infers `provider: "keycloak"`.
-A deprecation warning is logged suggesting migration to `provider_url`
-/ `provider_realm`.
+A deprecation warning is logged.
 
-```
-WARN token-exchange: keycloak_url/keycloak_realm are deprecated;
-     use provider=keycloak + provider_url + provider_realm instead
-```
+### Validation at Configure() time
 
-### Interface (Go)
+- Unknown provider names → rejected (`"provider X is not registered"`)
+- Identity type not in `provider.SupportedIdentityTypes()` → rejected
+- Unknown `assertion_type` → rejected (must be in `AssertionTypeURN` map)
+- Missing `token_url` after derivation → rejected
 
-No new Go interface is needed for URL derivation — it is a pure
-function of (`provider`, `provider_url`, `provider_realm`) →
-(`token_url`, `jwks_url`). Implemented as a switch in
-`applyDefaults()`.
+## Available Constants
 
 ```go
-// resolveEndpoints derives token_url and jwks_url from provider config.
-// Returns ("", "") when explicit URLs should be required.
-func resolveEndpoints(provider, providerURL, providerRealm string) (tokenURL, jwksURL string) {
-    base := strings.TrimRight(providerURL, "/")
-    switch provider {
-    case "keycloak":
-        realmBase := base + "/realms/" + providerRealm
-        return realmBase + "/protocol/openid-connect/token",
-               realmBase + "/protocol/openid-connect/certs"
-    case "entra-id":
-        tenant := providerRealm // tenant ID
-        return "https://login.microsoftonline.com/" + tenant + "/oauth2/v2.0/token",
-               "https://login.microsoftonline.com/" + tenant + "/discovery/v2.0/keys"
-    case "okta":
-        if providerRealm != "" {
-            return base + "/oauth2/" + providerRealm + "/v1/token",
-                   base + "/oauth2/" + providerRealm + "/v1/keys"
-        }
-        return base + "/oauth2/v1/token",
-               base + "/oauth2/v1/keys"
-    case "generic", "":
-        return "", "" // must supply explicit URLs
-    default:
-        return "", "" // unknown provider
-    }
-}
+// Identity types
+ClientSecretIdentity = "client-secret"
+SpiffeIdentity       = "spiffe"
+
+// Assertion types (keys into AssertionTypeURN)
+JWTSpiffeAssertion = "jwt-spiffe"
+JWTBearerAssertion = "jwt-bearer"
+
+// Policies
+PassthroughPolicy = "passthrough"
+ExchangePolicy    = "exchange"
+
+// Providers
+KeycloakProvider = "keycloak"
+GenericProvider  = "generic"
+
+// Defaults
+DefaultAssertion = JWTSpiffeAssertion
+DefaultProvider  = KeycloakProvider
 ```
 
-## Extension Point 2: Client Authentication
+## Reference Implementation: Keycloak
 
-### Current state
+See `provider_keycloak.go` for the reference implementation:
 
-The `exchange.ClientAuth` interface is already IdP-agnostic:
-
-```go
-// exchange/auth.go
-type ClientAuth interface {
-    Apply(req *http.Request) error
-}
-```
-
-Two implementations exist:
-- `ClientSecretAuth` — `client_id` + `client_secret` in request body
-- `JWTAssertionAuth` — JWT client assertion (`client_assertion_type` + `client_assertion`)
-
-### Proposed additions for IdP coverage
-
-| IdP | Supported auth methods | Implementation |
-|-----|----------------------|----------------|
-| **Keycloak** | `client-secret` ✅, `spiffe` (JWT assertion) ✅ | Already implemented |
-| **Entra ID** | `client-secret` ✅, `certificate` ❌ (new) | Needs `CertificateAuth` |
-| **Okta** | `client-secret` ✅, `jwt-bearer` ❌ (new assertion type) | Needs configurable assertion type |
-
-#### New identity type: `certificate` (future, for Entra ID)
-
-```yaml
-identity:
-  type: "certificate"
-  client_id: "app-client-id"
-  certificate_file: "/certs/client.pem"
-  private_key_file: "/certs/client.key"
-```
-
-Implements `ClientAuth` by constructing a self-signed JWT assertion
-using the X.509 certificate thumbprint (`x5t` header claim), signed
-with the private key. This is the standard Entra ID confidential
-client authentication flow.
-
-#### Configurable assertion type (for Okta)
-
-The `spiffe` identity type hardcodes the assertion type URN:
-
-```go
-// Current (Keycloak-specific)
-AssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe"
-```
-
-This should be configurable:
-
-```yaml
-identity:
-  type: "spiffe"
-  jwt_audience: "https://okta.example.com"
-  # Override the default assertion type (default: jwt-spiffe)
-  assertion_type: "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-```
-
-| Assertion type | IdP support |
-|---------------|-------------|
-| `urn:ietf:params:oauth:client-assertion-type:jwt-spiffe` | Keycloak ✅, Okta ❌, Entra ID ❌ |
-| `urn:ietf:params:oauth:client-assertion-type:jwt-bearer` | Keycloak ✅, Okta ✅, Entra ID ❌ |
-
-## Extension Point 3: SchemaProvider (config introspection)
-
-The plugin already implements `pipeline.SchemaProvider`:
-
-```go
-func (p *TokenExchange) ConfigSchema() []pipeline.FieldSchema {
-    return pipeline.SchemaOf(tokenExchangeConfig{})
-}
-```
-
-New fields (`provider`, `provider_url`, `provider_realm`,
-`assertion_type`) are automatically surfaced via struct tags. No
-framework changes needed.
+- `TokenEndpoint`: `{url}/realms/{realm}/protocol/openid-connect/token`
+- `DefaultAssertionType`: `jwt-spiffe`
+- `SupportedIdentityTypes`: `[client-secret, spiffe]`
+- `BuildClientAuth`: `ClientSecretAuth` or `JWTAssertionAuth` with `jwt-spiffe` URN
 
 ## What does NOT change
 
-The following are IdP-agnostic and require no modifications:
-
-- **RFC 8693 token exchange parameters** (`grant_type`, `subject_token`,
-  `requested_token_type`, `audience`, `scope`) — standard across all IdPs
-- **Route resolver** — host-to-audience matching, per-route `token_url` override
+- **RFC 8693 token exchange parameters** — standard across all IdPs
+- **Route resolver** — host-to-audience matching, per-route overrides
 - **Token cache** — SHA-256 keyed, IdP-agnostic
-- **Plugin registry** — `plugins.RegisterPlugin("token-exchange", ...)` unchanged
+- **Plugin registry** — `plugins.RegisterPlugin("token-exchange", ...)`
 - **SPIFFE provider injection** — `SetSPIFFEProvider` / `plugins.BuildWithSPIFFE`
 - **Credential file handling** — `/shared/client-id.txt`, `/shared/client-secret.txt`
 - **Error handling** — standard OAuth error response parsing (RFC 6749)
 
-## Implementation phases
+## Per-IdP Auth Method Matrix
 
-### Phase 1: Config generalization (this PR)
-- Add `provider`, `provider_url`, `provider_realm` fields
-- Deprecate `keycloak_url`, `keycloak_realm` (backward compat)
-- Implement `resolveEndpoints()` for keycloak, entra-id, okta, generic
-- Make `assertion_type` configurable on spiffe identity
-- Update Capabilities description
-- Document the contract (this file)
-
-### Phase 2: Entra ID plugin (separate PR)
-- Implement `CertificateAuth` (`exchange.ClientAuth`)
-- Add `identity.type: "certificate"` support
-- Test with Entra ID token endpoint
-
-### Phase 3: Okta plugin (separate PR)
-- Test `jwt-bearer` assertion type with Okta
-- Add Okta-specific integration test
-- Document Okta-specific configuration
+| IdP | `client-secret` | `spiffe` (JWT assertion) | `certificate` | Default assertion |
+|-----|----------------|------------------------|---------------|-------------------|
+| **Keycloak** | ✅ | ✅ (`jwt-spiffe`) | ❌ | `jwt-spiffe` |
+| **Okta** (future) | ✅ | ✅ (`jwt-bearer`) | ❌ | `jwt-bearer` |
+| **Entra ID** (future) | ✅ | ❌ | ✅ (future) | N/A |
 
 ## Testing strategy
 
-Each IdP integration should include:
-1. **Unit tests** — mock token endpoint, verify correct parameters
-2. **Config validation tests** — ensure required fields are enforced
-3. **URL derivation tests** — verify per-provider endpoint patterns
-4. **Integration tests** (optional) — against a real or emulated IdP
+Each IdP provider should include:
+1. **Unit tests** — `TokenEndpoint()` derivation for various inputs
+2. **`BuildClientAuth` tests** — verify correct `ClientAuth` construction
+3. **Validation tests** — unsupported identity types rejected
+4. **Registration guard** — `TestAllProviderFilesAreRegistered` catches missing `init()`
+5. **Integration tests** (optional) — against a real or emulated IdP
 
-The existing `exchange/client_test.go` provides the pattern for mock
-server tests.
+See `plugin_test.go` for the Keycloak provider test patterns.

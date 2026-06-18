@@ -38,7 +38,7 @@ type tokenExchangeConfig struct {
 	// When empty and keycloak_url is set, defaults to "keycloak" for
 	// backward compatibility. When "generic" or empty, token_url must
 	// be supplied explicitly.
-	Provider string `json:"provider" description:"IdP provider for endpoint derivation: keycloak, entra-id, okta, or generic." enum:"keycloak,entra-id,okta,generic"`
+	Provider string `json:"provider" description:"IdP provider for endpoint derivation and client auth. Only registered providers are accepted." enum:"keycloak,generic"`
 
 	// ProviderURL is the IdP base URL used for endpoint derivation.
 	// Interpretation depends on Provider:
@@ -140,11 +140,15 @@ type tokenExchangeRoute struct {
 func (c *tokenExchangeConfig) applyDefaults() {
 	// Backward compatibility: migrate keycloak_url/keycloak_realm to
 	// provider_url/provider_realm when the new fields are empty.
+	// Also infer provider=keycloak when any deprecated keycloak_* field
+	// is present (handles mixed legacy/new paths).
+	if c.KeycloakURL != "" || c.KeycloakRealm != "" {
+		if c.Provider == "" {
+			c.Provider = DefaultProvider
+		}
+	}
 	if c.KeycloakURL != "" && c.ProviderURL == "" {
 		c.ProviderURL = c.KeycloakURL
-		if c.Provider == "" {
-			c.Provider = "keycloak"
-		}
 		slog.Warn("token-exchange: keycloak_url is deprecated; use provider_url + provider=keycloak instead")
 	}
 	if c.KeycloakRealm != "" && c.ProviderRealm == "" {
@@ -152,16 +156,20 @@ func (c *tokenExchangeConfig) applyDefaults() {
 		slog.Warn("token-exchange: keycloak_realm is deprecated; use provider_realm + provider=keycloak instead")
 	}
 
-	// Derive token_url from the registered IdP provider when not set
-	// explicitly. LookupProvider returns nil for unknown/empty names,
-	// which leaves TokenURL empty — validate() will catch it.
-	if c.TokenURL == "" && c.Provider != "" {
+	// Derive token_url and default assertion_type from the registered
+	// IdP provider when not set explicitly.
+	if c.Provider != "" {
 		if p := LookupProvider(c.Provider); p != nil {
-			c.TokenURL = p.TokenEndpoint(c.ProviderURL, c.ProviderRealm)
+			if c.TokenURL == "" {
+				c.TokenURL = p.TokenEndpoint(c.ProviderURL, c.ProviderRealm)
+			}
+			if c.Identity.AssertionType == "" && c.Identity.Type == SpiffeIdentity {
+				c.Identity.AssertionType = p.DefaultAssertionType()
+			}
 		}
 	}
 	if c.DefaultPolicy == "" {
-		c.DefaultPolicy = "passthrough"
+		c.DefaultPolicy = PassthroughPolicy
 	}
 	if c.NoTokenPolicy == "" {
 		c.NoTokenPolicy = auth.NoTokenPolicyDeny
@@ -179,13 +187,13 @@ func (c *tokenExchangeConfig) applyDefaults() {
 		c.Routes.File = "/etc/authproxy/routes.yaml"
 	}
 	switch c.Identity.Type {
-	case "spiffe":
+	case SpiffeIdentity:
 		if c.Identity.ClientID == "" && c.Identity.ClientIDFile == "" {
 			c.Identity.ClientIDFile = "/shared/client-id.txt"
 		}
 		// JWT-SVID source is injected via the framework SPIFFE provider
 		// (T11) rather than read from a per-plugin file path.
-	case "client-secret":
+	case ClientSecretIdentity:
 		if c.Identity.ClientID == "" && c.Identity.ClientIDFile == "" {
 			c.Identity.ClientIDFile = "/shared/client-id.txt"
 		}
@@ -196,13 +204,19 @@ func (c *tokenExchangeConfig) applyDefaults() {
 }
 
 func (c *tokenExchangeConfig) validate() error {
+	// Reject unknown provider names early.
+	if c.Provider != "" && c.Provider != GenericProvider {
+		if LookupProvider(c.Provider) == nil {
+			return fmt.Errorf("provider %q is not registered (available providers are registered via init())", c.Provider)
+		}
+	}
 	if c.TokenURL == "" {
-		return errors.New("token_url is required (or set keycloak_url + keycloak_realm)")
+		return errors.New("token_url is required (or set provider + provider_url + provider_realm)")
 	}
 	switch c.DefaultPolicy {
-	case "exchange", "passthrough":
+	case ExchangePolicy, PassthroughPolicy:
 	default:
-		return fmt.Errorf("default_policy must be exchange or passthrough, got %q", c.DefaultPolicy)
+		return fmt.Errorf("default_policy must be %s or %s, got %q", ExchangePolicy, PassthroughPolicy, c.DefaultPolicy)
 	}
 	switch c.NoTokenPolicy {
 	case auth.NoTokenPolicyAllow, auth.NoTokenPolicyDeny, auth.NoTokenPolicyClientCredentials:
@@ -210,7 +224,7 @@ func (c *tokenExchangeConfig) validate() error {
 		return fmt.Errorf("no_token_policy must be allow, deny, or client-credentials, got %q", c.NoTokenPolicy)
 	}
 	switch c.Identity.Type {
-	case "spiffe":
+	case SpiffeIdentity:
 		// applyDefaults fills the identity file paths when the
 		// matching inline values are empty, so no per-field check
 		// for client_id here — Configure's best-effort read logs a
@@ -225,13 +239,35 @@ func (c *tokenExchangeConfig) validate() error {
 		if c.Identity.JWTAudience == "" {
 			return errors.New("tokenexchange: identity.type=spiffe requires identity.jwt_audience to be set")
 		}
-	case "client-secret":
+		// Reject invalid assertion_type (non-empty but unknown).
+		if c.Identity.AssertionType != "" {
+			if _, ok := AssertionTypeURN[c.Identity.AssertionType]; !ok {
+				return fmt.Errorf("tokenexchange: unknown assertion_type %q (supported: %s, %s)", c.Identity.AssertionType, JWTSpiffeAssertion, JWTBearerAssertion)
+			}
+		}
+	case ClientSecretIdentity:
 		// applyDefaults fills the identity file paths when the
 		// matching inline values are empty.
 	case "":
-		return errors.New("identity.type is required (spiffe or client-secret)")
+		return fmt.Errorf("identity.type is required (%s or %s)", SpiffeIdentity, ClientSecretIdentity)
 	default:
 		return fmt.Errorf("unknown identity.type %q", c.Identity.Type)
+	}
+	// Validate provider↔identity compatibility when a provider is set.
+	if c.Provider != "" && c.Provider != GenericProvider {
+		if p := LookupProvider(c.Provider); p != nil {
+			supported := p.SupportedIdentityTypes()
+			found := false
+			for _, s := range supported {
+				if s == c.Identity.Type {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("provider %q does not support identity.type=%q (supported: %v)", c.Provider, c.Identity.Type, supported)
+			}
+		}
 	}
 	return nil
 }
@@ -386,8 +422,7 @@ func (p *TokenExchange) Configure(raw json.RawMessage) error {
 	}
 
 	jwtSrc := p.jwtSource(c.Identity.JWTAudience)
-	clientAuth, err := buildClientAuthFrom(c.Identity.Type,
-		c.Identity.ClientID, c.Identity.ClientSecret, c.Identity.AssertionType, jwtSrc)
+	clientAuth, err := buildClientAuth(c.Provider, c.Identity, jwtSrc)
 	if err != nil {
 		return fmt.Errorf("token-exchange: %w", err)
 	}
@@ -435,9 +470,9 @@ func credentialsAreReady(id tokenExchangeIdentity, jwtSrc fwspiffe.JWTSource) bo
 		return false
 	}
 	switch id.Type {
-	case "client-secret":
+	case ClientSecretIdentity:
 		return id.ClientSecret != ""
-	case "spiffe":
+	case SpiffeIdentity:
 		// SPIFFE identity is ready iff a JWTSource was injected (via the
 		// framework Provider) and the operator's Secret mount has
 		// supplied the client_id.
@@ -446,44 +481,53 @@ func credentialsAreReady(id tokenExchangeIdentity, jwtSrc fwspiffe.JWTSource) bo
 	return false
 }
 
-// buildClientAuthFrom constructs an exchange.ClientAuth from explicit
-// args. Used both by Configure (against the local `c`, before p.cfg is
-// assigned) and by pollCredentials (which reads its credential values
-// from goroutine locals, not from the immutable p.cfg). Pure function
-// — no reads from the receiver.
+// buildClientAuth delegates client auth construction to the registered
 //
 // The "spiffe" identity path requires a non-nil JWTSource — supplied by
 // the framework spiffe.Provider via SetSPIFFEProvider (see
 // plugins.BuildWithSPIFFE). When the provider hasn't been wired in,
 // this returns an explicit configuration error rather than panicking.
-// assertionTypeURN maps short assertion type names to their full URN.
-var assertionTypeURN = map[string]string{
-	"jwt-spiffe": "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe",
-	"jwt-bearer": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-}
-
-func buildClientAuthFrom(identityType, clientID, clientSecret, assertionType string, jwtSrc fwspiffe.JWTSource) (exchange.ClientAuth, error) {
-	switch identityType {
-	case "spiffe":
+// IdP provider. When no provider is set (generic/explicit token_url),
+// falls back to a default implementation supporting client-secret and
+// spiffe with jwt-spiffe assertion type.
+func buildClientAuth(providerName string, identity tokenExchangeIdentity, jwtSrc fwspiffe.JWTSource) (exchange.ClientAuth, error) {
+	id := IdentityConfig{
+		Type:          identity.Type,
+		ClientID:      identity.ClientID,
+		ClientSecret:  identity.ClientSecret,
+		AssertionType: identity.AssertionType,
+		JWTAudience:   identity.JWTAudience,
+	}
+	if p := LookupProvider(providerName); p != nil {
+		return p.BuildClientAuth(id, jwtSrc)
+	}
+	// Fallback for generic/empty provider — basic client-secret and
+	// spiffe with default jwt-spiffe assertion.
+	switch identity.Type {
+	case SpiffeIdentity:
 		if jwtSrc == nil {
 			return nil, errors.New("spiffe identity requires a SPIFFE provider to be injected")
 		}
-		urn := assertionTypeURN[assertionType]
-		if urn == "" {
-			urn = assertionTypeURN["jwt-spiffe"] // default
+		assertionType := identity.AssertionType
+		if assertionType == "" {
+			assertionType = DefaultAssertion
+		}
+		urn, ok := AssertionTypeURN[assertionType]
+		if !ok {
+			return nil, fmt.Errorf("unknown assertion_type %q", assertionType)
 		}
 		return &exchange.JWTAssertionAuth{
-			ClientID:      clientID,
+			ClientID:      identity.ClientID,
 			AssertionType: urn,
 			TokenSource:   jwtSrc.FetchToken,
 		}, nil
-	case "client-secret":
+	case ClientSecretIdentity:
 		return &exchange.ClientSecretAuth{
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
+			ClientID:     identity.ClientID,
+			ClientSecret: identity.ClientSecret,
 		}, nil
 	default:
-		return nil, fmt.Errorf("unknown identity.type %q", identityType)
+		return nil, fmt.Errorf("unknown identity.type %q", identity.Type)
 	}
 }
 
@@ -502,7 +546,7 @@ func buildRouterFrom(defaultPolicy string, routes tokenExchangeRoutes) (*routing
 	for _, rc := range routes.Rules {
 		action := rc.Action
 		if action == "" && rc.Passthrough {
-			action = "passthrough"
+			action = PassthroughPolicy
 		}
 		rules = append(rules, routing.Route{
 			Host:          rc.Host,
@@ -530,7 +574,7 @@ func buildRouterFrom(defaultPolicy string, routes tokenExchangeRoutes) (*routing
 // process-lifetime context (see bgCancel) so Pipeline.Start's 60s
 // budget doesn't kill it. Shutdown cancels the poller.
 func (p *TokenExchange) Init(ctx context.Context) error {
-	if p.cfg.Identity.Type == "spiffe" && p.provider != nil && p.cfg.Identity.JWTAudience != "" {
+	if p.cfg.Identity.Type == SpiffeIdentity && p.provider != nil && p.cfg.Identity.JWTAudience != "" {
 		if err := p.provider.MirrorJWT(ctx, p.cfg.Identity.JWTAudience); err != nil {
 			// Mirror failures are non-fatal: the in-memory
 			// JWTSource keeps working even if the file mirror
@@ -581,7 +625,10 @@ func (p *TokenExchange) pollCredentials(ctx context.Context, needID, needSecret 
 		}
 		clientSecret = v
 	}
-	clientAuth, err := buildClientAuthFrom(p.cfg.Identity.Type, clientID, clientSecret, p.cfg.Identity.AssertionType, p.jwtSource(p.cfg.Identity.JWTAudience))
+	pollIdentity := p.cfg.Identity
+	pollIdentity.ClientID = clientID
+	pollIdentity.ClientSecret = clientSecret
+	clientAuth, err := buildClientAuth(p.cfg.Provider, pollIdentity, p.jwtSource(p.cfg.Identity.JWTAudience))
 	if err != nil {
 		slog.Warn("token-exchange: failed to rebuild client auth after credential load", "error", err)
 		return
