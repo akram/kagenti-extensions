@@ -405,12 +405,52 @@ func TestKeycloakProvider_TokenEndpoint_TrailingSlash(t *testing.T) {
 	}
 }
 
-func TestKeycloakProvider_JWKSEndpoint(t *testing.T) {
+func TestKeycloakProvider_DefaultAssertionType(t *testing.T) {
 	p := LookupProvider("keycloak")
-	got := p.JWKSEndpoint("https://keycloak.example.com", "my-realm")
-	want := "https://keycloak.example.com/realms/my-realm/protocol/openid-connect/certs"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
+	if got := p.DefaultAssertionType(); got != "jwt-spiffe" {
+		t.Errorf("keycloak default assertion type: got %q, want jwt-spiffe", got)
+	}
+}
+
+func TestKeycloakProvider_SupportedIdentityTypes(t *testing.T) {
+	p := LookupProvider("keycloak")
+	supported := p.SupportedIdentityTypes()
+	if len(supported) != 2 || supported[0] != "client-secret" || supported[1] != "spiffe" {
+		t.Errorf("keycloak supported identity types: got %v, want [client-secret spiffe]", supported)
+	}
+}
+
+func TestKeycloakProvider_BuildClientAuth_ClientSecret(t *testing.T) {
+	p := LookupProvider("keycloak")
+	id := IdentityConfig{Type: "client-secret", ClientID: "agent-1", ClientSecret: "secret"}
+	auth, err := p.BuildClientAuth(id, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if auth == nil {
+		t.Fatal("expected non-nil ClientAuth")
+	}
+}
+
+func TestKeycloakProvider_BuildClientAuth_Spiffe(t *testing.T) {
+	p := LookupProvider("keycloak")
+	jwt := &fakeJWTSource{token: "test-jwt"}
+	id := IdentityConfig{Type: "spiffe", ClientID: "agent-1", JWTAudience: "http://kc/realms/test"}
+	auth, err := p.BuildClientAuth(id, jwt)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if auth == nil {
+		t.Fatal("expected non-nil ClientAuth")
+	}
+}
+
+func TestKeycloakProvider_BuildClientAuth_UnsupportedType(t *testing.T) {
+	p := LookupProvider("keycloak")
+	id := IdentityConfig{Type: "certificate", ClientID: "agent-1"}
+	_, err := p.BuildClientAuth(id, nil)
+	if err == nil {
+		t.Fatal("expected error for unsupported identity type")
 	}
 }
 
@@ -494,7 +534,8 @@ func TestConfigure_ProviderURL_Preferred(t *testing.T) {
 
 func TestBuildClientAuth_DefaultAssertionType(t *testing.T) {
 	jwt := &fakeJWTSource{token: "test-jwt"}
-	auth, err := buildClientAuthFrom("spiffe", "client-1", "", "", jwt)
+	id := tokenExchangeIdentity{Type: "spiffe", ClientID: "client-1"}
+	auth, err := buildClientAuth("keycloak", id, jwt)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -514,7 +555,9 @@ func TestBuildClientAuth_DefaultAssertionType(t *testing.T) {
 
 func TestBuildClientAuth_JWTBearerAssertionType(t *testing.T) {
 	jwt := &fakeJWTSource{token: "test-jwt"}
-	auth, err := buildClientAuthFrom("spiffe", "client-1", "", "jwt-bearer", jwt)
+	id := tokenExchangeIdentity{Type: "spiffe", ClientID: "client-1", AssertionType: "jwt-bearer"}
+	// Use generic provider (no registered provider) to test fallback
+	auth, err := buildClientAuth("", id, jwt)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -529,5 +572,50 @@ func TestBuildClientAuth_JWTBearerAssertionType(t *testing.T) {
 	want := "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 	if got != want {
 		t.Errorf("jwt-bearer assertion type: got %q, want %q", got, want)
+	}
+}
+
+func TestValidate_InvalidAssertionType(t *testing.T) {
+	c := tokenExchangeConfig{
+		TokenURL:      "http://example.com/token",
+		DefaultPolicy: "passthrough",
+		NoTokenPolicy: "deny",
+		Identity: tokenExchangeIdentity{
+			Type:          "spiffe",
+			JWTAudience:   "http://kc/realms/test",
+			AssertionType: "invalid-type",
+		},
+	}
+	if err := c.validate(); err == nil {
+		t.Fatal("expected error for invalid assertion_type, got nil")
+	}
+}
+
+func TestValidate_ProviderIdentityIncompatibility(t *testing.T) {
+	c := tokenExchangeConfig{
+		Provider:      "keycloak",
+		TokenURL:      "http://example.com/token",
+		DefaultPolicy: "passthrough",
+		NoTokenPolicy: "deny",
+		Identity: tokenExchangeIdentity{
+			Type:     "certificate", // keycloak doesn't support certificate
+			ClientID: "agent-1",
+		},
+	}
+	if err := c.validate(); err == nil {
+		t.Fatal("expected error for unsupported identity type on keycloak, got nil")
+	}
+}
+
+func TestValidate_UnknownProviderRejected(t *testing.T) {
+	c := tokenExchangeConfig{
+		Provider:      "nonexistent-idp",
+		TokenURL:      "http://example.com/token",
+		DefaultPolicy: "passthrough",
+		NoTokenPolicy: "deny",
+		Identity:      tokenExchangeIdentity{Type: "client-secret", ClientID: "agent-1", ClientSecret: "s"},
+	}
+	if err := c.validate(); err == nil {
+		t.Fatal("expected error for unknown provider, got nil")
 	}
 }
